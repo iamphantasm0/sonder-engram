@@ -56,3 +56,20 @@ class AsyncMemoryWorker:
             self._loop.call_soon_threadsafe(self._loop.stop)
         except Exception:
             pass
+
+
+_DEFAULT_WORKER: "AsyncMemoryWorker | None" = None
+
+
+def get_default_worker() -> "AsyncMemoryWorker":
+    """Return a process-wide shared worker.
+
+    Cognee keeps global state (one embedded DB and default user), so every NPC
+    must run its memory operations on a SINGLE background loop. Combined with the
+    serialization lock in backend.py, this prevents concurrent-write corruption —
+    which showed up as one of two NPCs' memory coming back empty.
+    """
+    global _DEFAULT_WORKER
+    if _DEFAULT_WORKER is None:
+        _DEFAULT_WORKER = AsyncMemoryWorker()
+    return _DEFAULT_WORKER

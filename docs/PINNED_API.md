@@ -143,3 +143,22 @@ await cognee.prune.prune_data(); await cognee.prune.prune_system(metadata=True)
 5. `self_improvement=False` on session writes + one explicit `improve()` on sync behaves as intended (no premature graph build).
 
 To finish these, run `day05_smoke.py write` then (fresh process) `day05_smoke.py recall` with `LLM_API_KEY` set. Do **not** paste the key into chat — see the reply for secure options.
+
+---
+
+## Day-1 corrected recipe (verified end-to-end from a CLEAN state)
+
+Running the SDK against a **wiped** Cognee dir surfaced three issues the earlier dirty-state run masked. These fixes are what the SDK ships.
+
+1. **Build the graph with a PERMANENT write.** `remember(text, dataset_name, node_set)` with **no `session_id`** → Cognee runs `add()` + `cognify()`, which builds the per-NPC graph and materializes the dataset. The session-cache + `improve()` path does **not** create the dataset on a clean install (`SessionDistillationError: dataset not found`), so the graph stays empty and recall returns nothing or hallucinates. Do not rely on session distillation.
+
+2. **Serialize writes on ONE loop.** Cognee has global state (one embedded DB). Concurrent `cognify` runs from separate event loops corrupt each other — symptom: one of two NPCs' memory comes back empty. Use a single shared background worker + an `asyncio` lock so memory ops run one at a time.
+
+3. **Isolation is by `node_set`, not dataset.** With `ENABLE_BACKEND_ACCESS_CONTROL=false`, `datasets=[name]` does **not** scope retrieval — even `CHUNKS` returns other datasets' text, and `GRAPH_COMPLETION` bridges across NPCs through the shared player node. Isolate with node_set tags:
+   - write `node_set=["npc__<id>", "player__<id>"]`
+   - recall `node_name=["npc__<id>", "player__<id>"]` with `node_name_filter_operator="AND"`
+   Verified: Gethin recalls only his event, Mara only hers, across a process restart.
+
+4. **recall:** pass `auto_route=False` so it honors `GRAPH_COMPLETION` (otherwise Cognee may reroute to `GRAPH_COMPLETION_COT`). A brand-new NPC has no memory → Cognee raises a precondition error → the SDK catches it and returns `""` so dialogue never crashes.
+
+5. **Latency (DeepSeek + local fastembed):** permanent write ~2–3s incl. cognify; recall ~5–7s. Absorbed by the background worker so the game loop never blocks.
