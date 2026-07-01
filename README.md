@@ -75,6 +75,12 @@ cp .env.example .env      # add your key(s)
 pytest                    # unit tests use a fake backend (no key)
 python examples/terminal_demo.py write     # then, in a fresh process:
 python examples/terminal_demo.py recall
+
+# Easy web demo (recommended for trying it out)
+pip install -e ".[fastembed,web]"
+cp .env.example .env
+python examples/web_demo.py
+# Then open http://127.0.0.1:8000
 ```
 
 ## License

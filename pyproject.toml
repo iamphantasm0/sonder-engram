@@ -22,10 +22,15 @@ dependencies = ["cognee>=1.2.2"]
 [project.optional-dependencies]
 fastembed = ["fastembed>=0.3"]      # local, no-key embeddings
 dev = ["pytest>=8"]
+web = ["fastapi>=0.115", "uvicorn>=0.30", "jinja2>=3.1"]  # for easy web demos
 
 [project.urls]
 Homepage = "https://github.com/iamphantasm0/sonder-engram"
 Issues = "https://github.com/iamphantasm0/sonder-engram/issues"
+
+[project.scripts]
+sonder-sidecar = "sonder_engram.service:main"
+# Note: for web demo use `python examples/web_demo.py` after installing with [web]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sonder_engram"]

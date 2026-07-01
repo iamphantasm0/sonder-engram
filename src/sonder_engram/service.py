@@ -107,6 +107,27 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
         server.shutdown()
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for `sonder-sidecar` command and `python -m`."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Sonder memory sidecar — HTTP interface for sonder-engram SDK"
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="Host to bind (default 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--port", type=int,
+        default=int(os.environ.get("SONDER_PORT", "8765")),
+        help="Port to listen on (default 8765 or SONDER_PORT)"
+    )
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO)
-    serve(port=int(os.environ.get("SONDER_PORT", "8765")))
+    serve(host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()
