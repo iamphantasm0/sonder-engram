@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+
+# Virtualenvs
+.venv/
+.venv-cognee/
+venv/
+
+# Secrets — NEVER commit the real env. .env.example is the only env file that ships.
+.env
+.env.local
+
+# Cognee local state (embedded DBs, logs, session cache)
+.cognee/
+.cognee_system/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
