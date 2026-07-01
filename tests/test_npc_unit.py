@@ -4,6 +4,8 @@
     pytest
 """
 
+import asyncio
+
 from sonder_engram import NPC, FakeBackend
 from sonder_engram.backend import _first_text
 from sonder_engram.config import _slug
@@ -59,3 +61,14 @@ def test_first_text_reads_known_response_shapes():
     assert _first_text([{"content": "ctx"}]) == "ctx"
     assert _first_text([]) == ""
     assert _first_text(None) == ""
+
+
+def test_async_api_routes_through_worker():
+    # aremember/arecall run on a fresh asyncio loop but route through the shared
+    # worker loop (via wrap_future), so this exercises the cross-loop bridge.
+    async def go():
+        npc = NPC("gethin", "p1", backend=FakeBackend())
+        await npc.aremember("the player smashed a display vase")
+        return await npc.arecall("what happened?")
+
+    assert "vase" in asyncio.run(go())
