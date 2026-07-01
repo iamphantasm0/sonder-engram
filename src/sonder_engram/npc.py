@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from concurrent.futures import TimeoutError as _FutureTimeout
 from typing import Optional
@@ -100,25 +101,35 @@ class NPC:
             lambda: self.backend.forget(dataset=self.dataset), timeout=self._timeout(timeout)
         )
 
-    # --- async API (ADVANCED) ------------------------------------------------
-    # WARNING: these run on the CALLER's event loop, not the shared worker loop.
-    # Cognee has global state serialized by a per-loop lock, so mixing these with
-    # the default sync API, or running NPCs across multiple event loops, can let
-    # concurrent Cognee operations race and corrupt data. Use these ONLY if every
-    # NPC shares one event loop you control. Most games should use the sync API.
+    # --- async API -----------------------------------------------------------
+    # These route through the SAME shared worker loop as the sync API (via
+    # asyncio.wrap_future), so the actual Cognee work is serialized by the one
+    # lock and is safe to mix with sync calls, regardless of which event loop you
+    # await them on. (Calling a MemoryBackend directly, bypassing NPC, is still
+    # your responsibility to serialize — see docs/PINNED_API.md and issue #5.)
 
     async def aremember(self, event_text: str) -> None:
-        await self.backend.remember(
-            event_text, dataset=self.dataset, node_set=self.write_tags, session_id=self.session
+        future = self.worker.submit(
+            lambda: self.backend.remember(
+                event_text, dataset=self.dataset, node_set=self.write_tags, session_id=self.session
+            )
         )
+        await asyncio.wrap_future(future)
 
     async def arecall(self, question: str) -> str:
-        return await self.backend.recall(
-            question, dataset=self.dataset, node_set=self.recall_tags, session_id=self.session
+        future = self.worker.submit(
+            lambda: self.backend.recall(
+                question, dataset=self.dataset, node_set=self.recall_tags, session_id=self.session
+            )
         )
+        return await asyncio.wrap_future(future)
 
     async def async_sync(self) -> None:
-        await self.backend.flush(dataset=self.dataset, session_id=self.session)
+        future = self.worker.submit(
+            lambda: self.backend.flush(dataset=self.dataset, session_id=self.session)
+        )
+        await asyncio.wrap_future(future)
 
     async def aforget(self) -> None:
-        await self.backend.forget(dataset=self.dataset)
+        future = self.worker.submit(lambda: self.backend.forget(dataset=self.dataset))
+        await asyncio.wrap_future(future)

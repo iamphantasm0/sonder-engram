@@ -15,6 +15,7 @@ import asyncio
 import atexit
 import logging
 import threading
+from concurrent.futures import TimeoutError as _FutureTimeout
 from typing import Any, Awaitable, Callable, Optional
 
 _log = logging.getLogger("sonder_engram")
@@ -57,9 +58,16 @@ class AsyncMemoryWorker:
     def run(self, coro_factory: Callable[[], Awaitable[Any]], timeout: Optional[float] = None) -> Any:
         """Schedule a coroutine and block until it returns (used for recall / flush).
 
-        Raises concurrent.futures.TimeoutError if it exceeds `timeout`.
+        Raises concurrent.futures.TimeoutError if it exceeds `timeout`. On timeout the
+        underlying task is cancelled so a slow/rate-limited LLM call stops instead of
+        running to completion unseen (avoids leaked "Task was destroyed" work).
         """
-        return asyncio.run_coroutine_threadsafe(coro_factory(), self._loop).result(timeout)
+        future = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
+        try:
+            return future.result(timeout)
+        except _FutureTimeout:
+            future.cancel()
+            raise
 
     def drain(self, timeout: Optional[float] = None) -> None:
         """Wait for all in-flight writes to finish (call before flush/save)."""
@@ -75,10 +83,14 @@ class AsyncMemoryWorker:
         if self._closed:
             return
         self._closed = True
+        # Give in-flight writes a moment to finish (don't drop them)...
         try:
             self.drain(timeout=5)
         except Exception:
             pass
+        # ...then cancel any stragglers so we don't leak running tasks on shutdown.
+        for future in list(self._pending):
+            future.cancel()
         try:
             self._loop.call_soon_threadsafe(self._loop.stop)
         except Exception:
