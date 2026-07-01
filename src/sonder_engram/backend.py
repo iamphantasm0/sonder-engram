@@ -11,15 +11,23 @@ All calls map onto the Cognee v1.0 API confirmed in docs/PINNED_API.md.
 from __future__ import annotations
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Sequence
 
 from .config import Settings
 
+_log = logging.getLogger("sonder_engram")
+
 # Cognee keeps global state (one embedded DB), so only one operation may touch it
 # at a time or concurrent writes corrupt each other (one NPC's graph came back
 # empty). Locks are per-event-loop; with the shared default worker there is a
 # single loop, so this serializes every NPC's memory operations.
+#
+# LIMITATION: this is per-loop. The synchronous API (via the shared worker) is
+# always safe. The async API (aremember/arecall) runs on the CALLER's loop; if
+# you mix it with the sync worker or run NPCs on multiple loops, operations on
+# different loops take different locks and can still race. See NPC async docstrings.
 _locks: dict = {}
 
 
@@ -32,6 +40,18 @@ def _serialize() -> "asyncio.Lock":
     return lock
 
 
+# Substrings that mean "this NPC simply has no memory yet" (expected) rather than
+# an operational failure (auth / rate limit / network / Cognee internal error).
+_NO_MEMORY_HINTS = (
+    "precondition",
+    "not been created",
+    "no database",
+    "usernotfound",
+    "empty knowledge graph",
+    "empty graph",
+)
+
+
 class MemoryBackend(ABC):
     """The contract the NPC depends on. Keep it tiny."""
 
@@ -42,7 +62,7 @@ class MemoryBackend(ABC):
     async def recall(self, query: str, *, dataset: str, node_set: Sequence[str], session_id: str) -> str: ...
 
     @abstractmethod
-    async def sync(self, *, dataset: str, session_id: str) -> None: ...
+    async def flush(self, *, dataset: str, session_id: str) -> None: ...
 
     @abstractmethod
     async def forget(self, *, dataset: str) -> None: ...
@@ -53,6 +73,8 @@ def _first_text(results) -> str:
 
     GRAPH_COMPLETION answers arrive as a ResponseQAEntry (.answer) or, as seen in
     the Day-0.5 run, a ResponseGraphEntry (.text); context entries carry .content.
+    NOTE: this is duck-typed; a Cognee response-shape change could make it return
+    "" silently. Tracked as a hardening issue.
     """
     for r in results or []:
         for attr in ("answer", "content", "text"):
@@ -75,6 +97,8 @@ class LocalCogneeBackend(MemoryBackend):
     async def remember(self, text, *, dataset, node_set, session_id) -> None:
         import cognee
 
+        text = (text or "")[: self.settings.max_event_chars]
+
         kwargs = {}
         if self.settings.use_custom_ontology:
             from .ontology import npc_graph_model, ONTOLOGY_PROMPT
@@ -83,13 +107,10 @@ class LocalCogneeBackend(MemoryBackend):
             kwargs["custom_prompt"] = ONTOLOGY_PROMPT
 
         # Permanent write (no session_id): Cognee runs add() + cognify(), which
-        # BUILDS the per-NPC knowledge graph and materializes the dataset.
-        #
-        # We deliberately do NOT use the session-cache + improve() path: on a clean
-        # install the target dataset is never materialized by session writes, so
-        # improve()'s distillation fails ("dataset not found") and the graph stays
-        # empty — verified, see docs/PINNED_API.md. The LLM-backed cognify cost is
-        # absorbed by AsyncMemoryWorker, so the game loop still never blocks.
+        # BUILDS the per-NPC knowledge graph and materializes the dataset. The
+        # session-cache + improve() path does NOT create the dataset on a clean
+        # install, leaving the graph empty (see docs/PINNED_API.md). Cognify cost
+        # is absorbed by AsyncMemoryWorker so the game loop never blocks.
         # `session_id` is accepted for API symmetry but intentionally unused here.
         async with _serialize():
             await cognee.remember(
@@ -118,41 +139,44 @@ class LocalCogneeBackend(MemoryBackend):
                     node_name=list(node_set),
                     query_type=getattr(SearchType, self.settings.search_type),
                     top_k=self.settings.top_k,
-                    # Match ALL tags (this NPC AND this player), not any — isolates
-                    # memories across NPCs and across players.
+                    # Match ALL tags (this NPC AND this player) — isolates memories
+                    # across NPCs and across players.
                     node_name_filter_operator="AND",
-                    # Honor the requested search type; without this Cognee may reroute
-                    # (e.g. to GRAPH_COMPLETION_COT), which we don't want to depend on.
+                    # Honor the requested search type; else Cognee may reroute (COT).
                     auto_route=False,
                     **recall_kwargs,
                 )
         except Exception as exc:
-            # A brand-new NPC has no memory yet, which Cognee surfaces as a
-            # precondition error. A game NPC should stay neutral, not crash the
-            # dialogue — return empty and let the caller supply a default line.
-            import logging
-
-            logging.getLogger("sonder_engram").debug("recall: no memory yet (%s)", exc)
+            name = type(exc).__name__
+            msg = str(exc).lower()
+            if any(h in msg or h in name.lower() for h in _NO_MEMORY_HINTS):
+                # Expected: a brand-new NPC has nothing to recall yet.
+                _log.debug("recall: no memory yet for %s (%s)", dataset, name)
+                return ""
+            # Real operational failure (auth / rate limit / network / internal).
+            # Do NOT masquerade it as "no memory": log it, and re-raise if asked.
+            _log.error("recall failed for %s: %s: %s", dataset, name, exc)
+            if self.settings.raise_on_error:
+                raise
             return ""
         return _first_text(results)
 
-    async def sync(self, *, dataset, session_id) -> None:
+    async def flush(self, *, dataset, session_id) -> None:
         # No-op: the graph is built at remember() time (permanent write), so there
-        # is nothing to bridge. NPC.sync() still flushes the background worker so
-        # pending writes are durable before save/quit.
+        # is nothing to bridge. Durability is handled by NPC.sync() draining the
+        # background worker. Kept as a hook so a future batched-write backend can
+        # implement a real flush here.
         return None
 
     async def forget(self, *, dataset) -> None:
         import cognee
 
-        await cognee.forget(dataset=dataset)
+        async with _serialize():
+            await cognee.forget(dataset=dataset)
 
 
 class FakeBackend(MemoryBackend):
-    """In-memory backend for tests and offline dev — no LLM, no Cognee, no key.
-
-    Good enough to exercise NPC / worker wiring and dataset isolation.
-    """
+    """In-memory backend for tests and offline dev — no LLM, no Cognee, no key."""
 
     def __init__(self) -> None:
         self._store: dict[str, list[tuple[tuple[str, ...], str]]] = {}
@@ -170,7 +194,7 @@ class FakeBackend(MemoryBackend):
         ]
         return hits[-1] if hits else ""
 
-    async def sync(self, *, dataset, session_id) -> None:
+    async def flush(self, *, dataset, session_id) -> None:
         return None
 
     async def forget(self, *, dataset) -> None:
