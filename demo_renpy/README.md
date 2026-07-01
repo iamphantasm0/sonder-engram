@@ -14,13 +14,37 @@ to it over `http://127.0.0.1:8765`. This is also the seam the future web build u
 ## 1. Start the sidecar (in your SDK venv)
 
 From the repo root, with the SDK installed (`pip install -e ".[fastembed]"`) and a
-`.env` filled in (DeepSeek + local fastembed — see `../.env.example`):
+`.env` filled in (DeepSeek + local fastembed — see `../.env.example`).
+
+### Easy launchers (recommended)
 
 ```bash
-set -a; source .env; set +a          # load LLM_/EMBEDDING_ vars
-python -m sonder_engram.service       # listens on 127.0.0.1:8765
+# Linux / macOS
+cd demo_renpy
+chmod +x launch_sidecar.sh
+./launch_sidecar.sh
 ```
-Leave it running. `SONDER_PORT` overrides the port.
+
+```bat
+:: Windows
+cd demo_renpy
+launch_sidecar.bat
+```
+
+These scripts:
+- Load your `.env`
+- Start the sidecar using the installed `sonder-sidecar` command (or `python -m`)
+- Print the next steps
+
+You can also start it manually:
+
+```bash
+set -a; source .env; set +a
+python -m sonder_engram.service
+# or after pip install: sonder-sidecar
+```
+
+`SONDER_PORT` can be used to change the port (default 8765). Leave the sidecar running.
 
 ## 2. Add the demo to a Ren'Py project
 
@@ -49,3 +73,52 @@ Ren'Py projects need their launcher-generated shell (gui, options, screens), so:
 - If a line reads *"the town is oddly silent…"*, the sidecar isn't running on :8765.
 - Player identity is `player_uuid`, minted once and stored in the save slot, so the
   NPCs keep knowing *this* playthrough across launches.
+
+## Making it more runnable (exe + .sh)
+
+### Option A — Sidecar as a standalone binary (recommended for distribution)
+
+You can bundle just the memory sidecar into a single executable so players don't
+need Python or a venv.
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --name sonder-sidecar src/sonder_engram/service.py
+```
+
+- On Windows you get `dist/sonder-sidecar.exe`
+- On Linux you get `dist/sonder-sidecar`
+
+Then a player can run:
+
+```bash
+# Linux
+./sonder-sidecar
+
+# Windows
+sonder-sidecar.exe
+```
+
+(They still need to put their LLM keys in the environment or you can embed a
+default .env at build time — not recommended for secrets.)
+
+### Option B — Full Ren'Py game as .exe / .sh
+
+1. Copy the two `.rpy` files into a real Ren'Py project (as described above).
+2. In the **Ren'Py launcher**, choose **"Build Distributions"**.
+3. Ren'Py will generate platform packages, including:
+   - `YourGame-1.0-pc.zip` → contains `YourGame.exe` + `lib/` folder
+   - `YourGame-1.0-linux.tar.bz2` → contains `YourGame.sh`
+
+Users then run the generated `YourGame.exe` or `YourGame.sh`.  
+They must still start the sidecar separately (or you ship the sidecar exe next to it
+and document "run sonder-sidecar.exe first, then YourGame.exe").
+
+### Option C — Combined launcher (advanced)
+
+You can write a small wrapper (Python or shell) that:
+- Starts the sidecar as a subprocess (in the background)
+- Then launches the Ren'Py game executable
+- Kills the sidecar on exit
+
+This is possible but out of scope for the basic demo. See issues for future work.
