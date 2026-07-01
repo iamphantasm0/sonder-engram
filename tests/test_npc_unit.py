@@ -5,13 +5,15 @@
 """
 
 from sonder_engram import NPC, FakeBackend
+from sonder_engram.backend import _first_text
+from sonder_engram.config import _slug
 
 
 def test_remember_recall_roundtrip():
     npc = NPC("gethin", "p1", backend=FakeBackend())
     npc.remember("the player was rude about the sword")
     npc.sync()
-    assert "rude" in npc.recall("how do you feel?")
+    assert "rude" in npc.recall("how do you feel?", timeout=5)
 
 
 def test_memory_is_isolated_per_npc():
@@ -22,9 +24,8 @@ def test_memory_is_isolated_per_npc():
     smith.remember("smith-only memory")
     smith.sync()
 
-    # The baker has its own dataset and should know nothing about the smith's events.
-    assert baker.recall("anything?") == ""
-    assert "smith-only" in smith.recall("what happened?")
+    assert baker.recall("anything?", timeout=5) == ""
+    assert "smith-only" in smith.recall("what happened?", timeout=5)
 
 
 def test_memory_is_scoped_per_player():
@@ -35,6 +36,26 @@ def test_memory_is_scoped_per_player():
     npc_p1.remember("player_1 broke the display case")
     npc_p1.sync()
 
-    # Same NPC, different player tag -> different scoped memory.
-    assert npc_p2.recall("what did I do?") == ""
-    assert "display case" in npc_p1.recall("what did I do?")
+    # Same NPC, different player -> different scoped memory (AND-matched tags).
+    assert npc_p2.recall("what did I do?", timeout=5) == ""
+    assert "display case" in npc_p1.recall("what did I do?", timeout=5)
+
+
+def test_slug_sanitizes_and_bounds():
+    assert _slug("Gethin the Blacksmith!") == "Gethin_the_Blacksmith"
+    assert len(_slug("x" * 500)) <= 96
+    assert _slug("") == "unknown"
+
+
+def test_first_text_reads_known_response_shapes():
+    class QA:
+        answer, content, text = "the answer", None, None
+
+    class GraphEntry:
+        answer, content, text = None, None, "graph text"
+
+    assert _first_text([QA()]) == "the answer"
+    assert _first_text([GraphEntry()]) == "graph text"
+    assert _first_text([{"content": "ctx"}]) == "ctx"
+    assert _first_text([]) == ""
+    assert _first_text(None) == ""
