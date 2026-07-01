@@ -13,7 +13,7 @@ from typing import Optional
 
 from .backend import LocalCogneeBackend, MemoryBackend
 from .config import Settings, new_session_id, npc_dataset, player_tag
-from .worker import AsyncMemoryWorker
+from .worker import AsyncMemoryWorker, get_default_worker
 
 
 class NPC:
@@ -30,11 +30,23 @@ class NPC:
         self.player_id = player_id
         self.settings = settings or Settings()
         self.backend = backend or LocalCogneeBackend(self.settings)
-        # A shared worker can be passed in so many NPCs share one background loop.
-        self.worker = worker or AsyncMemoryWorker()
+        # All NPCs share ONE background loop by default (Cognee has global state);
+        # pass an explicit worker only if you know you want an isolated one.
+        self.worker = worker or get_default_worker()
 
         self.dataset = npc_dataset(npc_id)
-        self.node_set = [player_tag(player_id)]
+        # Isolation: Cognee's graph is global and, with access control off,
+        # datasets don't hard-scope retrieval — so two NPCs' memories pool together
+        # and bridge through the shared player node. We isolate with a per-NPC
+        # node_set tag: writes are tagged with the NPC (+ player), and recall
+        # filters to this NPC's tag so it never sees another NPC's events.
+        # See docs/PINNED_API.md.
+        self._npc_tag = self.dataset  # reuse "npc__<id>" as a per-NPC node_set tag
+        # Writes and recall both carry (NPC tag, player tag). Recall matches on ALL
+        # of them (AND), so a memory must belong to THIS npc AND THIS player — that
+        # isolates both across NPCs and across players/playthroughs.
+        self.write_tags = [self._npc_tag, player_tag(player_id)]
+        self.recall_tags = [self._npc_tag, player_tag(player_id)]
         self.session = new_session_id()
 
     # --- synchronous, game-friendly API (backed by the worker) ---------------
@@ -43,7 +55,7 @@ class NPC:
         """Record an engram about the player. Non-blocking (fire-and-forget)."""
         return self.worker.submit(
             lambda: self.backend.remember(
-                event_text, dataset=self.dataset, node_set=self.node_set, session_id=self.session
+                event_text, dataset=self.dataset, node_set=self.write_tags, session_id=self.session
             )
         )
 
@@ -55,15 +67,17 @@ class NPC:
         """
         return self.worker.run(
             lambda: self.backend.recall(
-                question, dataset=self.dataset, node_set=self.node_set, session_id=self.session
+                question, dataset=self.dataset, node_set=self.recall_tags, session_id=self.session
             ),
             timeout=timeout,
         )
 
     def sync(self, timeout: Optional[float] = None):
-        """Flush pending writes, then bridge this session into permanent memory.
+        """Flush pending writes so they're durable before save / quit.
 
-        Call on save / quit. After this, the memory survives a process restart.
+        With the permanent-write backend the graph is already built by remember(),
+        so this just waits for any in-flight background writes to finish. After it
+        returns, the memory survives a process restart.
         """
         self.worker.drain(timeout=timeout)
         return self.worker.run(
@@ -81,12 +95,12 @@ class NPC:
 
     async def aremember(self, event_text: str) -> None:
         await self.backend.remember(
-            event_text, dataset=self.dataset, node_set=self.node_set, session_id=self.session
+            event_text, dataset=self.dataset, node_set=self.write_tags, session_id=self.session
         )
 
     async def arecall(self, question: str) -> str:
         return await self.backend.recall(
-            question, dataset=self.dataset, node_set=self.node_set, session_id=self.session
+            question, dataset=self.dataset, node_set=self.recall_tags, session_id=self.session
         )
 
     async def async_sync(self) -> None:
