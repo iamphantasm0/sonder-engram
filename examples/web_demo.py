@@ -236,9 +236,7 @@ async def index():
             } else if (key === "tavern") {
                 prefetchMemory("mara", "What has this player done to you?");
             } else if (key === "grove") {
-                // Pre-load common questions for the Oracle area
-                prefetchMemory("gethin", "What do you remember this player doing to you?");
-                prefetchMemory("mara", "What has this player done to you?");
+                // Only prefetch Elara here — Gethin & Mara are already cached from forge/tavern visits.
                 prefetchMemory("elara", "What rumors have reached you about this traveler?");
             }
         }
@@ -281,9 +279,7 @@ async def index():
                     }
                 };
             }
-            // Extra warm-up (in case)
-            prefetchForLocation("forge");
-            prefetchForLocation("tavern");
+            // Prefetches happen on travel (setLoc). No need to warm up here.
         }
 
         function getMentionedNpcs(msg) {
@@ -558,8 +554,13 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             inp.value = "";
             const rememberText = `In the village group chat, the player said: "${msg}"`;
 
-            // Fire the memory writes in the background (don't block reactions or UI)
-            ["gethin", "mara", "elara"].forEach(npc =>
+            // Only write chat memory for @mentioned NPCs (or just gethin by default).
+            // Writing to all 3 NPCs queues 3×30s cognee pipelines on the single worker,
+            // starving the recalls the user actually wants to see. A @mention is the
+            // signal that this NPC should remember the conversation.
+            const targets = getMentionedNpcs(msg);
+            const dflt = targets.length >= 3 ? ["gethin"] : targets; // unaddressed "hey" -> just 1 NPC
+            dflt.forEach(npc =>
                 fetch("/api/remember", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -570,7 +571,6 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             addLog("Posted to village chat: " + msg);
 
             // Immediately trigger visible reactions (they will show "X is typing..." then the replies)
-            const targets = getMentionedNpcs(msg);
             triggerAutoReactions(msg, targets);
         }
 
