@@ -2,7 +2,7 @@
 builder = "RAILPACK"
 
 [deploy]
-startCommand = "python examples/web_demo.py"
+startCommand = "PYTHONPATH=/app/src python examples/web_demo.py"
 healthcheckPath = "/"
 sleepApplication = false
 
