@@ -1,0 +1,28 @@
+[build]
+builder = "RAILPACK"
+
+[deploy]
+startCommand = "python examples/web_demo.py"
+healthcheckPath = "/"
+sleepApplication = false
+
+# The script auto-detects $PORT (injected by Railway) and binds to 0.0.0.0 when present.
+# Optional: set SONDER_WEB_HOST=0.0.0.0 explicitly if needed.
+# Alternative (no startup banner):
+# startCommand = "uvicorn examples.web_demo:app --host 0.0.0.0 --port $PORT --no-access-log"
+
+# Persistent storage for Cognee (knowledge graphs, vectors, etc.)
+# After deploying, in Railway dashboard for this service:
+# 1. Volumes -> Create Volume named "cognee-data"
+# 2. Mount path: /root/.cognee
+# This makes NPC memories survive deploys/restarts.
+
+# Required env vars (set in Railway Variables, not committed):
+# LLM_API_KEY=...
+# LLM_PROVIDER=custom
+# LLM_MODEL=openai/deepseek-chat
+# LLM_ENDPOINT=https://api.deepseek.com/v1
+# EMBEDDING_PROVIDER=fastembed
+# EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+# EMBEDDING_DIMENSIONS=384
+# ENABLE_BACKEND_ACCESS_CONTROL=false

@@ -10,6 +10,15 @@ Run it:
 
 Then open http://127.0.0.1:8000 in your browser.
 
+This demo now behaves more like a real game:
+- Traveling to a location prefetches NPC memories in the background.
+- Oracle and NPC reactions use client-side cache for instant responses on repeat questions.
+- Multiple NPC calls run in parallel instead of one-by-one.
+
+Environment:
+- SONDER_WEB_PORT / PORT — port to listen on (Railway etc. set PORT)
+- SONDER_WEB_HOST — override bind host (e.g. 0.0.0.0 for containers)
+
 This uses the SDK directly (no sidecar needed). All memory is powered by
 Cognee knowledge graphs so NPCs actually remember what you did across "sessions".
 """
@@ -17,12 +26,13 @@ Cognee knowledge graphs so NPCs actually remember what you did across "sessions"
 from __future__ import annotations
 
 import os
+import time
+import asyncio
 from contextlib import asynccontextmanager
-from typing import Dict
+from typing import Dict, Tuple
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from sonder_engram import NPC, Settings
@@ -31,10 +41,19 @@ from sonder_engram import NPC, Settings
 # Demo configuration
 # -----------------------------------------------------------------------------
 DEFAULT_PLAYER_ID = "curious_traveler"
-PORT = int(os.environ.get("SONDER_WEB_PORT", "8000"))
+
+# Support standard $PORT (Railway, Render, etc.) and our override.
+# Default host: 127.0.0.1 locally, 0.0.0.0 when running in a platform that sets $PORT.
+PORT = int(os.environ.get("PORT") or os.environ.get("SONDER_WEB_PORT", "8000"))
+HOST = os.environ.get("SONDER_WEB_HOST") or ("0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
 
 # In-memory cache of NPCs per player (so different player_ids have isolated memories)
 _player_npcs: Dict[str, Dict[str, NPC]] = {}
+
+# Tiny server-side short cache for recalls (helps across browser refreshes while server runs)
+# Key: (player_id, npc_id, question) -> (answer, timestamp)
+_recall_cache: Dict[Tuple[str, str, str], Tuple[str, float]] = {}
+RECALL_CACHE_TTL = 180.0  # 3 minutes — short and demo-friendly
 
 
 def get_npcs(player_id: str) -> Dict[str, NPC]:
@@ -44,6 +63,7 @@ def get_npcs(player_id: str) -> Dict[str, NPC]:
         _player_npcs[player_id] = {
             "gethin": NPC("gethin_the_blacksmith", player_id=player_id, settings=settings),
             "mara": NPC("mara_the_bandit", player_id=player_id, settings=settings),
+            "elara": NPC("elara_the_seer", player_id=player_id, settings=settings),
         }
     return _player_npcs[player_id]
 
@@ -55,7 +75,8 @@ def get_npcs(player_id: str) -> Dict[str, NPC]:
 async def lifespan(app: FastAPI):
     # Warm up message
     print("Sonder Web Demo ready.")
-    print(f"Open http://127.0.0.1:{PORT} in your browser.")
+    display_host = "127.0.0.1" if HOST in ("0.0.0.0", "::") else HOST
+    print(f"Open http://{display_host}:{PORT} in your browser.")
     yield
 
 
@@ -70,319 +91,552 @@ async def index():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>The Town of Sonder • Memory Demo</title>
+    <title>Sonder • Text RPG</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&amp;family=Inter:wght@400;500&amp;display=swap');
-        
-        body {
-            font-family: 'Inter', system_ui, sans-serif;
+        body { font-family: ui-monospace, monospace; background:#0a0a0a; color:#c9a25f; }
+        .torn { background:#111; border:2px solid #4a3f2e; }
+        .link { 
+            color:#c9a25f; text-decoration:none; display:block; padding:4px 8px; 
+            background: #1a1815; border: 1px solid #4a3f2e; font: inherit; text-align: left; cursor: pointer;
+            margin: 1px 0;
         }
-        .title-font {
-            font-family: 'Playfair Display', Georgia, serif;
-        }
-        .npc-card {
-            transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s;
-        }
-        .npc-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-        }
-        .memory-box {
-            background: linear-gradient(to bottom, #f8fafc, #f1e7d2);
-            border: 1px solid #d1c4a8;
-        }
-        .event {
-            font-size: 0.875rem;
-            padding: 0.5rem 0.75rem;
-            background: #f8fafc;
-            border-left: 3px solid #854d0e;
-        }
-        .loading {
-            animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-        }
+        .link:hover { background:#1f180f; color:#f0d8a8; border-color:#c9a25f; }
+        .scene { background:#0a0a0a; border:1px solid #4a3f2e; padding:10px; line-height:1.3; }
+        .log { font-size:13px; }
+        .oracle { background:#1a140f; border:2px solid #5c4a2e; }
     </style>
 </head>
-<body class="bg-stone-950 text-stone-200">
-    <div class="max-w-5xl mx-auto p-6">
-        <!-- Header -->
-        <div class="flex items-center justify-between mb-8">
+<body class="p-4 max-w-[780px] mx-auto">
+    <!-- Landing / Explainer (shown first, like a real game title screen) -->
+    <div id="landing">
+      <div class="text-center mb-4">
+        <h1 class="text-4xl font-bold tracking-wider">SONDER</h1>
+        <p class="text-sm opacity-80">Persistent memory for NPCs • Powered by Cognee knowledge graphs</p>
+      </div>
+
+      <div class="torn p-4 text-sm leading-relaxed space-y-3 mb-4">
+        <p><strong>Why this exists:</strong> Every NPC you've ever met in a game was faking it. A looped smile. One line of dialogue. They forget your face the moment you turn around. Props wearing people.</p>
+        
+        <p><strong>Sonder changes that.</strong> It gives NPCs a real <em>engram</em> — a trace of what you did — stored in a knowledge graph. Insult the blacksmith on Monday. Quit the game. Come back on Thursday (or restart the server). He's still cold to you. Not because of a flag. Because the graph remembers.</p>
+
+        <p><strong>How the demo works (real-game style):</strong></p>
+        <ul class="list-disc pl-5 text-xs space-y-0.5">
+          <li>Travel between locations — this prefetches memories in the background (exactly what a game engine does on scene load)</li>
+          <li>Take actions → they are written to the NPC's permanent memory via the sonder-engram SDK</li>
+          <li>Click [restart server] → fresh process, same player_id → NPCs still remember (the graph survived)</li>
+          <li>The Oracle lets you query what NPCs actually recall about you</li>
+          <li>Post in the village group chat — every NPC remembers it. They react automatically with @mentions</li>
+          <li>Visible timing + caches show you the real cost and how games hide it</li>
+        </ul>
+
+        <p class="text-[10px] opacity-70">All memory is <strong>real</strong>. No scripts, no fake responses. Powered by the open-source <a href="https://github.com/iamphantasm0/sonder-engram" class="underline">sonder-engram</a> SDK + Cognee.</p>
+      </div>
+
+      <div class="text-center">
+        <button onclick="startPlaying()" 
+                class="link text-base px-8 py-2 font-bold">PLAY THE GAME →</button>
+        <div class="text-[10px] mt-2 opacity-60">All memory is real. Powered by sonder-engram + Cognee.</div>
+      </div>
+    </div>
+
+    <!-- The actual game UI (hidden until you click Play) -->
+    <div id="game-ui" style="display: none;">
+    <div class="torn p-3">
+        <div class="flex justify-between text-sm mb-2 border-b border-[#4a3f2e] pb-1">
+            <div><strong>SONDER</strong> <span class="text-xs">text rpg</span></div>
             <div>
-                <h1 class="title-font text-5xl font-bold tracking-tighter text-amber-300">The Town of Sonder</h1>
-                <p class="text-stone-400 mt-1">A living memory demo powered by Cognee</p>
-            </div>
-            <div class="text-right text-sm">
-                <div class="text-amber-300 font-medium">NPCs that actually remember you</div>
-                <div class="text-stone-500">Across sessions • Across restarts</div>
+                Player: 
+                <input id="pid-input" class="bg-transparent border-b border-[#4a3f2e] px-1 w-40" value="curious_traveler" onchange="setPlayerId(this.value)">
+                <button onclick="newLife()" class="text-xs">[new life]</button>
+                <button onclick="restartServer()" class="text-xs">[restart server]</button>
             </div>
         </div>
 
-        <!-- Player Identity -->
-        <div class="mb-8 bg-stone-900 border border-stone-800 rounded-2xl p-6">
-            <div class="flex items-center gap-x-3 mb-3">
-                <span class="font-semibold text-amber-300">Your Identity</span>
-                <span class="text-xs px-2 py-0.5 bg-stone-800 rounded-full text-stone-400">Stable across playthroughs</span>
-            </div>
-            
-            <div class="flex gap-3 items-center">
-                <input id="player-id" 
-                       class="flex-1 bg-stone-950 border border-stone-700 focus:border-amber-600 rounded-xl px-4 py-2.5 text-lg font-medium outline-none"
-                       value="curious_traveler" 
-                       placeholder="Enter a player ID">
-                <button onclick="changePlayer()"
-                        class="px-6 py-2.5 bg-amber-700 hover:bg-amber-600 active:bg-amber-800 transition-colors text-white rounded-xl font-medium">
-                    Change Identity
-                </button>
-                <button onclick="resetAllMemories()"
-                        class="px-4 py-2.5 border border-red-900 hover:bg-red-950 text-red-400 rounded-xl text-sm transition-colors">
-                    Reset Memories
-                </button>
-            </div>
-            <div class="text-xs text-stone-500 mt-2">
-                Changing your identity gives you a completely fresh start with the NPCs.
-            </div>
+        <div class="scene mb-3">
+            <div id="loc-name" class="font-bold text-lg"></div>
+            <div id="loc-desc" class="text-sm"></div>
         </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-            
-            <!-- Gethin -->
-            <div class="npc-card bg-stone-900 border border-stone-800 rounded-3xl p-6">
-                <div class="flex items-start justify-between mb-4">
-                    <div>
-                        <div class="text-amber-300 font-semibold text-xl">Gethin</div>
-                        <div class="text-stone-400 text-sm">The Blacksmith</div>
-                    </div>
-                    <div class="text-4xl">🔨</div>
-                </div>
-                
-                <p class="text-stone-400 text-sm mb-5 leading-relaxed">
-                    A proud craftsman who takes his work very seriously.
-                </p>
-                
-                <div class="space-y-2 mb-6">
-                    <div class="text-xs uppercase tracking-widest text-stone-500 px-1">Actions you can take</div>
-                    
-                    <button onclick="performAction('gethin', 'The player warmly praised Gethin\\'s craftsmanship and bought a fine sword.')"
-                            class="w-full text-left px-4 py-3 bg-stone-800 hover:bg-stone-700 active:bg-stone-900 transition rounded-2xl text-sm flex items-center justify-between group">
-                        <span>Praise his craftsmanship</span>
-                        <span class="text-amber-400 group-active:scale-95 transition">→</span>
-                    </button>
-                    
-                    <button onclick="performAction('gethin', 'The player insulted Gethin\\'s craftsmanship and walked out without buying anything.')"
-                            class="w-full text-left px-4 py-3 bg-stone-800 hover:bg-stone-700 active:bg-stone-900 transition rounded-2xl text-sm flex items-center justify-between group">
-                        <span>Insult his work and leave</span>
-                        <span class="text-amber-400 group-active:scale-95 transition">→</span>
-                    </button>
-                </div>
-                
-                <button onclick="askAbout('gethin')"
-                        class="w-full bg-gradient-to-r from-amber-700 to-yellow-800 hover:from-amber-600 hover:to-yellow-700 transition text-white font-medium py-3.5 rounded-2xl flex items-center justify-center gap-2">
-                    <span>Ask Gethin how he feels about you</span>
-                </button>
-                
-                <div id="gethin-memory" class="memory-box mt-4 hidden p-4 rounded-2xl text-sm text-stone-800"></div>
-            </div>
-
-            <!-- Mara -->
-            <div class="npc-card bg-stone-900 border border-stone-800 rounded-3xl p-6">
-                <div class="flex items-start justify-between mb-4">
-                    <div>
-                        <div class="text-amber-300 font-semibold text-xl">Mara</div>
-                        <div class="text-stone-400 text-sm">The Bandit</div>
-                    </div>
-                    <div class="text-4xl">🗡️</div>
-                </div>
-                
-                <p class="text-stone-400 text-sm mb-5 leading-relaxed">
-                    A captured outlaw who watches everything carefully.
-                </p>
-                
-                <div class="space-y-2 mb-6">
-                    <div class="text-xs uppercase tracking-widest text-stone-500 px-1">Actions you can take</div>
-                    
-                    <button onclick="performAction('mara', 'The player spared Mara\\'s life instead of turning her in to the guards.')"
-                            class="w-full text-left px-4 py-3 bg-stone-800 hover:bg-stone-700 active:bg-stone-900 transition rounded-2xl text-sm flex items-center justify-between group">
-                        <span>Spare her life</span>
-                        <span class="text-amber-400 group-active:scale-95 transition">→</span>
-                    </button>
-                    
-                    <button onclick="performAction('mara', 'The player turned Mara in to the guards for the bounty.')"
-                            class="w-full text-left px-4 py-3 bg-stone-800 hover:bg-stone-700 active:bg-stone-900 transition rounded-2xl text-sm flex items-center justify-between group">
-                        <span>Turn her in for the bounty</span>
-                        <span class="text-amber-400 group-active:scale-95 transition">→</span>
-                    </button>
-                </div>
-                
-                <button onclick="askAbout('mara')"
-                        class="w-full bg-gradient-to-r from-amber-700 to-yellow-800 hover:from-amber-600 hover:to-yellow-700 transition text-white font-medium py-3.5 rounded-2xl flex items-center justify-center gap-2">
-                    <span>Ask Mara how she feels about you</span>
-                </button>
-                
-                <div id="mara-memory" class="memory-box mt-4 hidden p-4 rounded-2xl text-sm text-stone-800"></div>
-            </div>
+        <div class="mb-2">
+            <div class="text-xs">TRAVEL</div>
+            <div id="travel" class="text-sm"></div>
         </div>
 
-        <!-- Event Log -->
-        <div class="bg-stone-900 border border-stone-800 rounded-3xl p-6">
-            <div class="flex justify-between items-center mb-3">
-                <div>
-                    <span class="font-semibold">Recent Events</span>
-                    <span class="ml-2 text-xs text-stone-500">What the NPCs have recorded</span>
-                </div>
-                <button onclick="clearLog()" class="text-xs text-stone-500 hover:text-stone-300">Clear log</button>
-            </div>
-            <div id="event-log" class="space-y-1 text-sm max-h-48 overflow-auto pr-2"></div>
+        <div class="mb-2">
+            <div class="text-xs">ACTIONS HERE (click the lines below):</div>
+            <div id="actions" class="text-sm"></div>
         </div>
 
-        <div class="mt-6 text-center text-xs text-stone-500">
-            Memories are stored in a real knowledge graph. 
-            Try different choices, then ask the NPCs about you. 
-            Change your identity to start over.
+        <div id="oracle" class="oracle p-2 mb-2 hidden">
+            <div class="font-bold text-sm">The Oracle</div>
+            <div id="oracle-actions" class="text-sm"></div>
+            <div id="oracle-result" class="mt-1 text-sm hidden p-1 border-l-2 border-[#5c4a2e]"></div>
+        </div>
+
+        <div>
+            <div class="text-xs flex justify-between"><span>DEEDS</span> <button onclick="clearLog()" class="text-[10px]">[clear]"></button></div>
+            <div id="log" class="log max-h-28 overflow-auto"></div>
+        </div>
+
+        <div class="mt-3 border-t border-[#4a3f2e] pt-2">
+            <div class="text-xs">VILLAGE GROUP CHAT <span class="text-[10px]">(press Enter or Post; @gethin/@mara/@elara to target specific NPCs — they react automatically)</span></div>
+            <div id="chat-log" class="log max-h-24 overflow-auto mb-1 text-xs"></div>
+            <div class="flex gap-1">
+                <input id="chat-input" class="flex-1 bg-[#111] border border-[#4a3f2e] px-1 text-xs" placeholder="Say something... (Enter to post, @gethin etc)">
+                <button onclick="postToChat()" class="text-xs px-2 border border-[#4a3f2e]">Post</button>
+            </div>
         </div>
     </div>
 
+    </div> <!-- /#game-ui -->
+
     <script>
-        let currentPlayer = "curious_traveler";
-        
-        function logEvent(text) {
-            const log = document.getElementById("event-log");
-            const div = document.createElement("div");
-            div.className = "event rounded-lg mb-1 text-stone-300";
-            div.textContent = text;
-            log.prepend(div);
-            
-            // Keep only last 8 events
-            while (log.children.length > 8) {
-                log.removeChild(log.lastChild);
+        let player = "curious_traveler";
+        let loc = "square";
+        let logs = [];
+        let chatEntries = [];
+
+        // Client-side memory cache — like a real game pre-loading NPC state when you enter an area.
+        // Keyed by "player:npc:question" → answer string.
+        // This makes repeated Oracle questions and "NPCs react" instant on cache hit.
+        const memoryCache = {};
+
+        function cacheKey(npc, question) {
+            return `${player}:${npc}:${question}`;
+        }
+
+        function getCached(npc, question) {
+            return memoryCache[cacheKey(npc, question)];
+        }
+
+        function setCached(npc, question, answer) {
+            memoryCache[cacheKey(npc, question)] = answer || "";
+        }
+
+        // Prefetch like a real game would: when you travel to a location, kick off
+        // recall(s) in the background so the info is ready when the player asks.
+        async function prefetchMemory(npc, question) {
+            const key = cacheKey(npc, question);
+            if (memoryCache[key] !== undefined) return; // already have it
+            try {
+                const res = await fetch("/api/recall", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ player_id: player, npc_id: npc, question })
+                });
+                const d = await res.json();
+                setCached(npc, question, d.answer);
+            } catch (e) {}
+        }
+
+        function prefetchForLocation(key) {
+            if (key === "forge") {
+                prefetchMemory("gethin", "What do you remember this player doing to you?");
+            } else if (key === "tavern") {
+                prefetchMemory("mara", "What has this player done to you?");
+            } else if (key === "grove") {
+                // Pre-load common questions for the Oracle area
+                prefetchMemory("gethin", "What do you remember this player doing to you?");
+                prefetchMemory("mara", "What has this player done to you?");
+                prefetchMemory("elara", "What rumors have reached you about this traveler?");
             }
         }
-        
-        async function performAction(npc, eventText) {
-            const res = await fetch("/api/remember", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ 
-                    player_id: currentPlayer, 
-                    npc_id: npc, 
-                    event: eventText 
-                })
-            });
-            
-            if (res.ok) {
-                logEvent(`${npc === "gethin" ? "Gethin" : "Mara"}: ${eventText}`);
-                
-                // Auto refresh memory after action
-                setTimeout(() => askAbout(npc, true), 600);
-            } else {
-                alert("Failed to record memory. Is the server running?");
-            }
+
+        function formatTiming(ms, fromCache) {
+            const secs = (ms / 1000).toFixed(1);
+            return fromCache ? `${secs}s (from cache)` : `${secs}s`;
         }
-        
-        async function askAbout(npc, silent = false) {
-            const memoryEl = document.getElementById(npc + "-memory");
-            memoryEl.classList.remove("hidden");
-            memoryEl.innerHTML = `<span class="loading text-amber-700">Thinking...</span>`;
-            
-            const question = npc === "gethin" 
-                ? "How do you feel about this player, and why?"
-                : "How do you feel about this player and why?";
-            
-            const res = await fetch("/api/recall", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ 
-                    player_id: currentPlayer, 
-                    npc_id: npc, 
-                    question: question 
-                })
-            });
-            
-            const data = await res.json();
-            
-            if (data.answer) {
-                memoryEl.innerHTML = `
-                    <div class="font-medium text-amber-900 mb-1">Gethin says:</div>
-                    <div class="leading-snug">"${data.answer}"</div>
-                `;
-                if (!silent) {
-                    logEvent(`You asked ${npc === "gethin" ? "Gethin" : "Mara"} about yourself.`);
+
+        function startPlaying() {
+            const landing = document.getElementById('landing');
+            const game = document.getElementById('game-ui');
+            if (landing) landing.style.display = 'none';
+            if (game) game.style.display = 'block';
+
+            // Initialize the game UI now that elements are visible
+            initGameUI();
+        }
+
+        function initGameUI() {
+            const inp = document.getElementById("pid-input");
+            if (inp) {
+                inp.value = player;
+                inp.onchange = () => setPlayerId(inp.value);
+            }
+            // The status was already called in onload; just set up the world
+            logs = ["08:01 You arrive in Eldridge. No one knows you."];
+            chatEntries = [];
+            renderLog();
+            renderChat();
+            setLoc("square");
+
+            // Enter posts chat message (real chat feel)
+            const chatInput = document.getElementById("chat-input");
+            if (chatInput) {
+                chatInput.onkeydown = (e) => {
+                    if (e.key === "Enter") {
+                        e.preventDefault();
+                        postToChat();
+                    }
+                };
+            }
+            // Extra warm-up (in case)
+            prefetchForLocation("forge");
+            prefetchForLocation("tavern");
+        }
+
+        function getMentionedNpcs(msg) {
+            const m = (msg || "").toLowerCase();
+            const targets = [];
+            if (m.includes("@gethin")) targets.push("gethin");
+            if (m.includes("@mara")) targets.push("mara");
+            if (m.includes("@elara")) targets.push("elara");
+            return targets.length > 0 ? targets : ["gethin", "mara", "elara"];
+        }
+
+        async function triggerAutoReactions(message, targets) {
+            const el = document.getElementById("chat-log");
+            const thinking = document.createElement("div");
+            const typingText = targets.length === 1 
+                ? `${targets[0] === "gethin" ? "Gethin" : targets[0] === "mara" ? "Mara" : "Elara"} is typing...`
+                : "NPCs are typing...";
+            thinking.textContent = typingText;
+            thinking.style.fontStyle = "italic";
+            thinking.style.opacity = "0.6";
+            el.appendChild(thinking);
+
+            let question = `The player said in the village group chat: "${message}".
+
+As yourself, reply naturally and briefly in the group chat. If you have any memories of this specific player, let them shape your tone and what you say. Keep it conversational.`;
+            if (targets.length === 1) {
+                question = `The player addressed you directly: "${message}".
+
+As yourself, reply naturally in character. Use any memories you have of this player.`;
+            }
+
+            const results = await Promise.all(targets.map(async (npc) => {
+                const clientCached = getCached(npc, question);
+                if (clientCached !== undefined) {
+                    return { npc, answer: clientCached, duration: 0, cached: true };
                 }
+                const fetchStart = performance.now();
+                try {
+                    const res = await fetch("/api/recall", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ player_id: player, npc_id: npc, question })
+                    });
+                    const d = await res.json();
+                    const ans = d.answer || "";
+                    setCached(npc, question, ans);
+                    return { npc, answer: ans, duration: performance.now() - fetchStart, cached: d.cached === true };
+                } catch (e) {
+                    return { npc, answer: "", duration: performance.now() - fetchStart, cached: false };
+                }
+            }));
+
+            thinking.remove();
+
+            results.forEach(({ npc, answer, duration, cached }) => {
+                const name = npc === "gethin" ? "Gethin" : npc === "mara" ? "Mara" : "Elara";
+                const tstr = duration > 10 ? ` (${formatTiming(duration, cached)})` : (cached ? ' (cached)' : '');
+                const finalAnswer = answer || "*thinks for a moment*";
+                chatEntries.push(`${name}: ${finalAnswer}${tstr}`);
+            });
+
+            renderChat();
+        }
+
+        const data = {
+            square: {
+                n: "Village Square",
+                d: "Muddy crossroads. Smoke from the forge, laughter from the tavern, mist from the grove.",
+                acts: [
+                    {t: "Watch the villagers", e: "You watched the slow rhythm of village life."},
+                    {t: "Help carry firewood", e: "You helped an old man with his wood."}
+                ],
+                go: ["forge", "tavern", "grove"]
+            },
+            forge: {
+                n: "The Forge",
+                d: "Heat and hammer strikes. Gethin works iron with intense focus.",
+                acts: [
+                    {t: "Praise his craft and buy a blade", e: "You praised Gethin's craftsmanship and bought a sword."},
+                    {t: "Insult his work", e: "You mocked Gethin's craftsmanship and left empty-handed."}
+                ],
+                go: ["square", "tavern"]
+            },
+            tavern: {
+                n: "The Drunken Boar",
+                d: "Dim light, wary eyes. Mara sits in the corner, watching.",
+                acts: [
+                    {t: "Buy her a drink and talk", e: "You bought Mara a drink and heard her story."},
+                    {t: "Slip the guards her location", e: "You betrayed Mara's location to the town guard."}
+                ],
+                go: ["square", "forge"]
+            },
+            grove: {
+                n: "The Oracle's Grove",
+                d: "Ancient stones in the mist. The Oracle waits, eyes clouded with visions.",
+                acts: [],
+                go: ["square"]
+            }
+        };
+
+        function setLoc(key) {
+            loc = key;
+            const L = data[key];
+            document.getElementById("loc-name").textContent = L.n;
+            document.getElementById("loc-desc").textContent = L.d;
+
+            const actEl = document.getElementById("actions");
+            actEl.innerHTML = "";
+            const o = document.getElementById("oracle");
+
+            if (key === "grove") {
+                o.classList.remove("hidden");
+                const oact = document.getElementById("oracle-actions");
+                oact.innerHTML = "";
+                const qs = [
+                    {l:"Ask what Gethin remembers", n:"gethin", q:"What do you remember this player doing to you?"},
+                    {l:"Ask what Mara remembers", n:"mara", q:"What has this player done to you?"},
+                    {l:"Ask what Elara remembers", n:"elara", q:"What rumors have reached you about this traveler?"},
+                    {l:"Ask for the full truth", special:true}
+                ];
+                qs.forEach(q => {
+                    const btn = document.createElement("button");
+                    btn.className = "link oracle-link";
+                    btn.textContent = "> " + q.l;
+                    btn.onclick = async (e) => {
+                        e.preventDefault();
+                        const orig = btn.textContent;
+                        btn.textContent = orig + " [loading...]";
+                        btn.disabled = true;
+                        try {
+                            const r = document.getElementById("oracle-result");
+                            r.classList.remove("hidden");
+
+                            if (q.special) {
+                                // Full truth: parallel + cache (real game would have pre-warmed these)
+                                r.innerHTML = "The Oracle consults the memories...";
+                                const t0 = performance.now();
+                                const fullQ = "What exactly do you remember the player doing?";
+                                const recalls = await Promise.all(["gethin","mara","elara"].map(async (nn) => {
+                                    const cached = getCached(nn, fullQ);
+                                    if (cached !== undefined) {
+                                        return { nn, answer: cached, dt: 0, cached: true };
+                                    }
+                                    const res = await fetch("/api/recall", {
+                                        method:"POST", headers:{"Content-Type":"application/json"},
+                                        body:JSON.stringify({player_id:player, npc_id:nn, question:fullQ})
+                                    });
+                                    const d = await res.json();
+                                    const ans = d.answer || "silence";
+                                    setCached(nn, fullQ, ans);
+                                    return { nn, answer: ans, dt: null, cached: d.cached === true };
+                                }));
+                                const totalDt = performance.now() - t0;
+                                r.innerHTML = recalls.map(({nn, answer, dt, cached}) => {
+                                    const timeStr = dt !== null ? formatTiming(dt, cached) : formatTiming(totalDt / 3, cached);
+                                    return `<div><strong>${nn}:</strong> ${answer} <span class="text-[10px] opacity-60">(${timeStr})</span></div>`;
+                                }).join("");
+                            } else {
+                                // Single NPC query – check cache first (prefetched on travel!)
+                                const cached = getCached(q.n, q.q);
+                                if (cached !== undefined) {
+                                    r.innerHTML = `${cached || "The mists stay silent."} <span class="text-[10px] opacity-60">(cached)</span>`;
+                                    btn.textContent = orig;
+                                    btn.disabled = false;
+                                    return;
+                                }
+
+                                r.innerHTML = "Querying memory (real Cognee recall + LLM — a few seconds the first time for a location)...";
+                                const fetchStart = performance.now();
+                                const res = await fetch("/api/recall", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({player_id:player, npc_id:q.n, question:q.q})});
+                                const d = await res.json();
+                                const dt = performance.now() - fetchStart;
+                                const answer = d.answer || "The mists stay silent.";
+                                setCached(q.n, q.q, answer);
+                                const isServerCached = d.cached === true;
+                                r.innerHTML = `${answer} <span class="text-[10px] opacity-60">(${formatTiming(dt, isServerCached)})</span>`;
+                            }
+                        } finally {
+                            btn.textContent = orig;
+                            btn.disabled = false;
+                        }
+                    };
+                    oact.appendChild(btn);
+                });
             } else {
-                memoryEl.innerHTML = `<span class="text-stone-600">They don't seem to recognize you yet.</span>`;
+                o.classList.add("hidden");
+                L.acts.forEach(act => {
+                    const btn = document.createElement("button");
+                    btn.className = "link action-link";
+                    btn.textContent = "> " + act.t;
+                    btn.onclick = (e) => {
+                        e.preventDefault();
+                        const orig = btn.textContent;
+                        btn.textContent = orig + " [sent]";
+                        btn.disabled = true;
+                        addLog(act.e);  // show the deed immediately (real-game feel)
+                        // Fire remember; restore button when the request acknowledges (fast now)
+                        fetch("/api/remember", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ player_id: player, npc_id: getNpc(key), event: act.e })
+                        }).finally(() => {
+                            btn.textContent = orig;
+                            btn.disabled = false;
+                        }).catch(() => {});
+                    };
+                    actEl.appendChild(btn);
+                });
+            }
+
+            const t = document.getElementById("travel");
+            t.innerHTML = "";
+            L.go.forEach(g => {
+                const btn = document.createElement("button");
+                btn.className = "link travel-link";
+                btn.textContent = "→ " + data[g].n;
+                btn.onclick = (e) => {
+                    e.preventDefault();
+                    setLoc(g);
+                };
+                t.appendChild(btn);
+            });
+
+            // Real-game pattern: prefetch memories for this location in the background.
+            // Next time you talk to the Oracle or ask NPCs to react, answers can come from cache.
+            prefetchForLocation(key);
+        }
+
+        function getNpc(l) {
+            if (l==="forge") return "gethin";
+            if (l==="tavern") return "mara";
+            return null;
+        }
+
+        // doAction removed — actions log immediately and fire remember in background from the click handler
+
+
+        function addLog(m) {
+            const d = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+            logs.unshift(d + " " + m);
+            if (logs.length > 9) logs.length = 9;
+            renderLog();
+        }
+
+        function renderLog() {
+            const el = document.getElementById("log");
+            if (!logs.length) {
+                el.innerHTML = `<div class="text-[#6b5f4f]">No deeds yet.</div>`;
+                return;
+            }
+            el.innerHTML = logs.map(l => `<div class="log-entry">${l}</div>`).join("");
+        }
+
+        function clearLog() { logs = []; renderLog(); }
+
+        function renderChat() {
+            const el = document.getElementById("chat-log");
+            if (!chatEntries.length) {
+                el.innerHTML = `<div class="text-[#6b5f4f]">The village is quiet...</div>`;
+                return;
+            }
+            el.innerHTML = chatEntries.map(c => `<div>${c}</div>`).join("");
+        }
+
+        async function postToChat() {
+            const inp = document.getElementById("chat-input");
+            const msg = (inp.value || "").trim();
+            if (!msg) return;
+            const entry = "You: " + msg;
+            chatEntries.push(entry);
+            renderChat();
+            inp.value = "";
+            const rememberText = `In the village group chat, the player said: "${msg}"`;
+
+            // Fire the memory writes in the background (don't block reactions or UI)
+            ["gethin", "mara", "elara"].forEach(npc =>
+                fetch("/api/remember", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ player_id: player, npc_id: npc, event: rememberText })
+                }).catch(() => {})
+            );
+
+            addLog("Posted to village chat: " + msg);
+
+            // Immediately trigger visible reactions (they will show "X is typing..." then the replies)
+            const targets = getMentionedNpcs(msg);
+            triggerAutoReactions(msg, targets);
+        }
+
+        // npcsReactToChat removed — reactions now happen automatically after every chat post (with @ support)
+
+        async function newLife() {
+            const newId = "stranger_" + Math.floor(Math.random()*9999);
+            player = newId;
+            const inp = document.getElementById("pid-input");
+            if (inp) inp.value = player;
+            logs = [];
+            chatEntries = [];
+            // Clear client cache when starting over
+            Object.keys(memoryCache).forEach(k => delete memoryCache[k]);
+            await fetch("/api/forget", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({player_id:player})});
+            addLog("A new life begins. The town does not know you.");
+            renderChat();
+            setLoc("square");
+        }
+
+        function setPlayerId(val) {
+            if (!val) return;
+            // Clear previous player's cached memories
+            Object.keys(memoryCache).forEach(k => delete memoryCache[k]);
+            player = val.trim();
+            addLog("Identity set to " + player + ". Future deeds will be under this name.");
+            fetch("/api/status", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({player_id:player})});
+        }
+
+        async function restartServer() {
+            const btns = document.querySelectorAll('button');
+            // Visual feedback
+            const origTexts = [];
+            btns.forEach((b, i) => { origTexts[i] = b.textContent; b.textContent = '[restarting...]'; });
+
+            try {
+                const res = await fetch("/api/restart", {method:"POST"});
+                const data = await res.json();
+
+                // Clear client state to simulate fresh launch
+                Object.keys(memoryCache).forEach(k => delete memoryCache[k]);
+                logs = [];
+                chatEntries = [];
+                renderLog();
+                renderChat();
+
+                addLog("*** SERVER RESTARTED *** " + (data.message || ""));
+                addLog("Fresh NPC objects created, but the Cognee knowledge graph persists.");
+
+                // Re-init the current location with same player (memories should still be there)
+                await fetch("/api/status", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({player_id:player})});
+                setLoc(loc);  // re-render current scene + trigger prefetches
+            } finally {
+                btns.forEach((b, i) => b.textContent = origTexts[i]);
             }
         }
-        
-        async function changePlayer() {
-            const input = document.getElementById("player-id");
-            const newId = input.value.trim() || "curious_traveler";
-            
-            if (newId === currentPlayer) return;
-            
-            currentPlayer = newId;
-            
-            // Clear displayed memories
-            document.getElementById("gethin-memory").classList.add("hidden");
-            document.getElementById("mara-memory").classList.add("hidden");
-            
-            // Clear log
-            document.getElementById("event-log").innerHTML = "";
-            
-            logEvent(`You are now known as "${currentPlayer}". The NPCs have no memory of you.`);
-            
-            // Optional: fetch a status to "touch" the new player
-            await fetch("/api/status", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ player_id: currentPlayer })
-            });
-        }
-        
-        async function resetAllMemories() {
-            if (!confirm("Clear all memories for the current player?")) return;
-            
-            await fetch("/api/forget", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({ player_id: currentPlayer })
-            });
-            
-            document.getElementById("gethin-memory").classList.add("hidden");
-            document.getElementById("mara-memory").classList.add("hidden");
-            document.getElementById("event-log").innerHTML = "";
-            
-            logEvent("All memories for this playthrough have been wiped.");
-        }
-        
-        function clearLog() {
-            document.getElementById("event-log").innerHTML = "";
-        }
-        
-        // Keyboard support
-        document.addEventListener("keydown", function(e) {
-            if (e.key === "Enter" && document.activeElement.id === "player-id") {
-                changePlayer();
-            }
-        });
-        
-        // Initial greeting
-        window.onload = function() {
-            const log = document.getElementById("event-log");
-            log.innerHTML = `
-                <div class="event rounded-lg mb-1">You arrive in a small town. The locals have no memory of you yet.</div>
-            `;
-            
-            // Pre-fill and set initial player
-            const input = document.getElementById("player-id");
-            input.value = currentPlayer;
-            
-            // Optional first recall after short delay
-            setTimeout(() => {
-                // Don't auto-ask so user can explore
-            }, 1200);
-        }
-        
-        // Expose for debugging
-        window.sonderDemo = { askAbout, performAction, changePlayer };
+
+        window.onload = async () => {
+            // Only do the non-UI work on initial load (landing is shown)
+            await fetch("/api/status", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({player_id:player})});
+
+            // Warm common memories early so when player clicks "Play" things are ready
+            prefetchForLocation("forge");
+            prefetchForLocation("tavern");
+            prefetchForLocation("grove");
+        };
     </script>
 </body>
 </html>"""
@@ -405,7 +659,21 @@ async def api_remember(request: Request):
     if not npc or not event:
         return {"ok": False, "error": "invalid request"}
     
-    await npc.aremember(event)
+    # Fire-and-forget the remember so the HTTP response returns immediately.
+    # The actual work (cognify etc) happens on the shared background worker.
+    async def _background_remember():
+        try:
+            await npc.aremember(event)
+        except Exception as e:
+            print("remember background error:", e)
+    
+    asyncio.create_task(_background_remember())
+    
+    # Optimistically invalidate short recall cache (the write is in flight)
+    to_delete = [k for k in _recall_cache if k[0] == player_id and k[1] == npc_id]
+    for k in to_delete:
+        _recall_cache.pop(k, None)
+    
     return {"ok": True}
 
 
@@ -422,8 +690,24 @@ async def api_recall(request: Request):
     if not npc:
         return {"answer": ""}
     
-    answer = await npc.arecall(question)
-    return {"answer": answer or ""}
+    # Check tiny server cache first
+    cache_key = (player_id, npc_id, question)
+    now = time.time()
+    if cache_key in _recall_cache:
+        ans, ts = _recall_cache[cache_key]
+        if now - ts < RECALL_CACHE_TTL:
+            return {"answer": ans, "cached": True}
+    
+    try:
+        answer = await npc.arecall(question) or ""
+    except Exception:
+        # Graceful for missing datasets (no remembers yet for this NPC/player)
+        answer = ""
+    
+    # Store in short cache
+    _recall_cache[cache_key] = (answer, now)
+    
+    return {"answer": answer, "cached": False}
 
 
 @app.post("/api/forget")
@@ -435,9 +719,13 @@ async def api_forget(request: Request):
     for npc in npcs.values():
         await npc.aforget()
     
-    # Also clear from cache
+    # Clear NPC instance cache + short recall cache for this player
     if player_id in _player_npcs:
         del _player_npcs[player_id]
+    
+    to_delete = [k for k in _recall_cache if k[0] == player_id]
+    for k in to_delete:
+        _recall_cache.pop(k, None)
     
     return {"ok": True}
 
@@ -450,14 +738,32 @@ async def api_status(request: Request):
     return {"ok": True, "player_id": player_id}
 
 
+@app.post("/api/restart")
+async def api_restart(request: Request):
+    """Simulate a full server restart for the demo.
+    Clears the in-process NPC cache (fresh objects) but leaves
+    the underlying Cognee graph data intact → memories survive.
+    """
+    global _player_npcs, _recall_cache
+    _player_npcs.clear()
+    _recall_cache.clear()
+    return {
+        "ok": True,
+        "message": "Server cache cleared. Persistent Cognee graph data survives the 'restart'."
+    }
+
+
 if __name__ == "__main__":
     print("\n" + "="*60)
     print("SONDER WEB DEMO")
     print("="*60)
     print("Starting local web server...")
-    print(f"→ Open http://127.0.0.1:{PORT} in your browser")
-    print("→ Make sure you have a valid .env with LLM_API_KEY")
-    print("→ Use the actions, then click the 'Ask ...' buttons")
+    display_host = "127.0.0.1" if HOST in ("0.0.0.0", "::") else HOST
+    print(f"→ Open http://{display_host}:{PORT} in your browser")
+    print("→ Click 'Play the Game', travel around, take actions (logs instantly), chat + Enter (auto reactions with typing indicator)")
     print("="*60 + "\n")
     
-    uvicorn.run("examples.web_demo:app", host="127.0.0.1", port=PORT, reload=False)
+    # Use the app object directly (not a string import path).
+    # This makes `python examples/web_demo.py` work reliably from the project root
+    # without ModuleNotFoundError for 'examples'.
+    uvicorn.run(app, host=HOST, port=PORT, reload=False)
