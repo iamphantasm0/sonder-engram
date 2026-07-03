@@ -55,6 +55,18 @@ _player_npcs: Dict[str, Dict[str, NPC]] = {}
 _recall_cache: Dict[Tuple[str, str, str], Tuple[str, float]] = {}
 RECALL_CACHE_TTL = 180.0  # 3 minutes — short and demo-friendly
 
+# Keep strong references to fire-and-forget background tasks. The event loop
+# only holds WEAK refs to Tasks, so an unreferenced create_task() can be
+# garbage-collected mid-flight and the memory write silently dropped (RUF006).
+_background_tasks: set = set()
+
+
+def _spawn(coro) -> None:
+    """create_task + retain a reference until the task completes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 def get_npcs(player_id: str) -> Dict[str, NPC]:
     """Get or create the demo NPCs for a given player."""
@@ -215,6 +227,13 @@ async def index():
             memoryCache[cacheKey(npc, question)] = answer || "";
         }
 
+        // A write changes what an NPC knows — drop every cached answer for that
+        // NPC so the next recall re-fetches instead of showing the pre-deed reply.
+        function invalidateCached(npc) {
+            const prefix = `${player}:${npc}:`;
+            Object.keys(memoryCache).forEach(k => { if (k.startsWith(prefix)) delete memoryCache[k]; });
+        }
+
         // Prefetch like a real game would: when you travel to a location, kick off
         // recall(s) in the background so the info is ready when the player asks.
         async function prefetchMemory(npc, question) {
@@ -233,9 +252,9 @@ async def index():
 
         function prefetchForLocation(key) {
             if (key === "forge") {
-                prefetchMemory("gethin", "What do you remember this player doing to you?");
+                prefetchMemory("gethin", "You are Gethin the blacksmith. Speaking only from your own firsthand memory, in first person: what has this player done to you?");
             } else if (key === "tavern") {
-                prefetchMemory("mara", "What has this player done to you?");
+                prefetchMemory("mara", "You are Mara the bandit. Speaking only from your own firsthand memory, in first person: what has this player done to you?");
             } else if (key === "grove") {
                 // Only prefetch Elara here — Gethin & Mara are already cached from forge/tavern visits.
                 prefetchMemory("elara", "What rumors have reached you about this traveler?");
@@ -408,8 +427,8 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 const oact = document.getElementById("oracle-actions");
                 oact.innerHTML = "";
                 const qs = [
-                    {l:"Ask what Gethin remembers", n:"gethin", q:"What do you remember this player doing to you?"},
-                    {l:"Ask what Mara remembers", n:"mara", q:"What has this player done to you?"},
+                    {l:"Ask what Gethin remembers", n:"gethin", q:"You are Gethin the blacksmith. Speaking only from your own firsthand memory, in first person: what has this player done to you?"},
+                    {l:"Ask what Mara remembers", n:"mara", q:"You are Mara the bandit. Speaking only from your own firsthand memory, in first person: what has this player done to you?"},
                     {l:"Ask Elara what the whispers say", n:"elara", q:"What rumors have reached you about this traveler?"},
                     {l:"Ask for the full truth", special:true}
                 ];
@@ -493,6 +512,10 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                     btn.textContent = orig + " [sent]";
                     btn.disabled = true;
                     addLog(act.e);  // show the deed immediately (real-game feel)
+                    // The deed changes what NPCs know — drop stale client-cached
+                    // answers for the acting NPC (and Elara, who hears public deeds).
+                    invalidateCached(getNpc(key));
+                    if (key === "forge" || key === "tavern") invalidateCached("elara");
                     // Fire remember; restore button when the request acknowledges.
                     // Forge/tavern deeds are PUBLIC — the server also whispers them
                     // to Elara (town gossip). Her own grove deeds stay hers alone.
@@ -579,6 +602,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             // signal that this NPC should remember the conversation.
             const targets = getMentionedNpcs(msg);
             const dflt = targets.length >= 3 ? ["gethin"] : targets; // unaddressed "hey" -> just 1 NPC
+            dflt.forEach(npc => invalidateCached(npc)); // chat writes make cached answers stale too
             dflt.forEach(npc =>
                 fetch("/api/remember", {
                     method: "POST",
@@ -686,7 +710,7 @@ async def api_remember(request: Request):
         except Exception as e:
             print("remember background error:", e)
 
-    asyncio.create_task(_background_remember())
+    _spawn(_background_remember())
 
     # Town gossip: public deeds done to Gethin/Mara also reach Elara the seer —
     # written as HER OWN engram (per-NPC isolation stays intact; gossip is an
@@ -704,7 +728,7 @@ async def api_remember(request: Request):
                 except Exception as e:
                     print("gossip background error:", e)
 
-            asyncio.create_task(_background_gossip())
+            _spawn(_background_gossip())
             # Elara's cached answers are now stale too
             to_delete = [k for k in _recall_cache if k[0] == player_id and k[1] == "elara"]
             for k in to_delete:
