@@ -9,7 +9,7 @@
 
 **Sonder** is the feeling that every NPC has an inner life as complex as yours. This project makes it real.
 
-🎮 **Live demo:** [sonder-engram.up.railway.app](https://sonder-engram.up.railway.app) — no setup, click and play.
+🎮 **Live demo:** [sonder-engram.up.railway.app](https://sonder-engram.up.railway.app) — no setup, click and play. · 📦 **PyPI:** [sonder-engram](https://pypi.org/project/sonder-engram/)
 
 Built for the [WeMakeDevs × Cognee hackathon](https://www.wemakedevs.org/hackathons/cognee) ("Best Use of Open Source" track).
 
@@ -26,7 +26,11 @@ python examples/web_demo.py
 # open http://127.0.0.1:8000
 ```
 
-<!-- Once published to PyPI, installing the SDK alone is just: pip install sonder-engram -->
+Just want the SDK? It's on PyPI:
+
+```bash
+pip install sonder-engram
+```
 
 1. Click **Play the Game** — type a name; it's your save, and it stays logged in on this browser
 2. Go to the Forge → insult or praise the blacksmith
