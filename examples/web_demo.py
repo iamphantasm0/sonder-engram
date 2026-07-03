@@ -55,6 +55,18 @@ _player_npcs: Dict[str, Dict[str, NPC]] = {}
 _recall_cache: Dict[Tuple[str, str, str], Tuple[str, float]] = {}
 RECALL_CACHE_TTL = 180.0  # 3 minutes — short and demo-friendly
 
+# Keep strong references to fire-and-forget background tasks. The event loop
+# only holds WEAK refs to Tasks, so an unreferenced create_task() can be
+# garbage-collected mid-flight and the memory write silently dropped (RUF006).
+_background_tasks: set = set()
+
+
+def _spawn(coro) -> None:
+    """create_task + retain a reference until the task completes."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 def get_npcs(player_id: str) -> Dict[str, NPC]:
     """Get or create the demo NPCs for a given player."""
@@ -127,6 +139,7 @@ async def index():
           <li>Click [restart server] → fresh process, same player_id → NPCs still remember (the graph survived)</li>
           <li>The Oracle lets you query what NPCs actually recall about you</li>
           <li>Post in the village group chat — every NPC remembers it. They react automatically with @mentions</li>
+          <li>Word travels: deeds at the forge or tavern reach Elara the seer as gossip — visit the grove and she'll hint at what you did elsewhere</li>
           <li>Visible timing + caches show you the real cost and how games hide it</li>
         </ul>
 
@@ -169,13 +182,13 @@ async def index():
         </div>
 
         <div id="oracle" class="oracle p-2 mb-2 hidden">
-            <div class="font-bold text-sm">The Oracle</div>
+            <div class="font-bold text-sm">Elara the Seer</div>
             <div id="oracle-actions" class="text-sm"></div>
             <div id="oracle-result" class="mt-1 text-sm hidden p-1 border-l-2 border-[#5c4a2e]"></div>
         </div>
 
         <div>
-            <div class="text-xs flex justify-between"><span>DEEDS</span> <button onclick="clearLog()" class="text-[10px]">[clear]"></button></div>
+            <div class="text-xs flex justify-between"><span>DEEDS</span> <button onclick="clearLog()" class="text-[10px]">[clear]</button></div>
             <div id="log" class="log max-h-28 overflow-auto"></div>
         </div>
 
@@ -214,6 +227,13 @@ async def index():
             memoryCache[cacheKey(npc, question)] = answer || "";
         }
 
+        // A write changes what an NPC knows — drop every cached answer for that
+        // NPC so the next recall re-fetches instead of showing the pre-deed reply.
+        function invalidateCached(npc) {
+            const prefix = `${player}:${npc}:`;
+            Object.keys(memoryCache).forEach(k => { if (k.startsWith(prefix)) delete memoryCache[k]; });
+        }
+
         // Prefetch like a real game would: when you travel to a location, kick off
         // recall(s) in the background so the info is ready when the player asks.
         async function prefetchMemory(npc, question) {
@@ -232,9 +252,9 @@ async def index():
 
         function prefetchForLocation(key) {
             if (key === "forge") {
-                prefetchMemory("gethin", "What do you remember this player doing to you?");
+                prefetchMemory("gethin", "You are Gethin the blacksmith. Speaking only from your own firsthand memory, in first person: what has this player done to you?");
             } else if (key === "tavern") {
-                prefetchMemory("mara", "What has this player done to you?");
+                prefetchMemory("mara", "You are Mara the bandit. Speaking only from your own firsthand memory, in first person: what has this player done to you?");
             } else if (key === "grove") {
                 // Only prefetch Elara here — Gethin & Mara are already cached from forge/tavern visits.
                 prefetchMemory("elara", "What rumors have reached you about this traveler?");
@@ -291,6 +311,14 @@ async def index():
             return targets.length > 0 ? targets : ["gethin", "mara", "elara"];
         }
 
+        // Per-NPC voice for chat reactions. Elara's persona sells the gossip
+        // mechanic: what she "sees" is the village whispers written to her graph.
+        const PERSONA = {
+            gethin: "You are Gethin, the gruff blacksmith of Eldridge. Plain words, short sentences, no patience for flattery.",
+            mara: "You are Mara, a wary bandit who trusts almost no one. Guarded, dry, streetwise.",
+            elara: "You are Elara, the village seer of Eldridge. You hear every whisper in town and speak in calm, knowing tones — if gossip about this player has reached you, hint that you know what they did elsewhere."
+        };
+
         async function triggerAutoReactions(message, targets) {
             const el = document.getElementById("chat-log");
             const thinking = document.createElement("div");
@@ -312,7 +340,8 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             }
 
             const results = await Promise.all(targets.map(async (npc) => {
-                const clientCached = getCached(npc, question);
+                const q = (PERSONA[npc] ? PERSONA[npc] + "\\n\\n" : "") + question;
+                const clientCached = getCached(npc, q);
                 if (clientCached !== undefined) {
                     return { npc, answer: clientCached, duration: 0, cached: true };
                 }
@@ -321,11 +350,11 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                     const res = await fetch("/api/recall", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ player_id: player, npc_id: npc, question })
+                        body: JSON.stringify({ player_id: player, npc_id: npc, question: q })
                     });
                     const d = await res.json();
                     const ans = d.answer || "";
-                    setCached(npc, question, ans);
+                    setCached(npc, q, ans);
                     return { npc, answer: ans, duration: performance.now() - fetchStart, cached: d.cached === true };
                 } catch (e) {
                     return { npc, answer: "", duration: performance.now() - fetchStart, cached: false };
@@ -374,8 +403,11 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             },
             grove: {
                 n: "The Oracle's Grove",
-                d: "Ancient stones in the mist. The Oracle waits, eyes clouded with visions.",
-                acts: [],
+                d: "Ancient stones in the mist. Elara the seer waits, eyes clouded with visions. They say she hears every whisper in Eldridge.",
+                acts: [
+                    {t: "Cross her palm with silver for a reading", e: "The player paid Elara for a reading and listened to her visions with respect."},
+                    {t: "Scoff and call her visions a fraud", e: "The player mocked Elara's visions and called her a fraud to her face."}
+                ],
                 go: ["square"]
             }
         };
@@ -395,9 +427,9 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 const oact = document.getElementById("oracle-actions");
                 oact.innerHTML = "";
                 const qs = [
-                    {l:"Ask what Gethin remembers", n:"gethin", q:"What do you remember this player doing to you?"},
-                    {l:"Ask what Mara remembers", n:"mara", q:"What has this player done to you?"},
-                    {l:"Ask what Elara remembers", n:"elara", q:"What rumors have reached you about this traveler?"},
+                    {l:"Ask what Gethin remembers", n:"gethin", q:"You are Gethin the blacksmith. Speaking only from your own firsthand memory, in first person: what has this player done to you?"},
+                    {l:"Ask what Mara remembers", n:"mara", q:"You are Mara the bandit. Speaking only from your own firsthand memory, in first person: what has this player done to you?"},
+                    {l:"Ask Elara what the whispers say", n:"elara", q:"What rumors have reached you about this traveler?"},
                     {l:"Ask for the full truth", special:true}
                 ];
                 qs.forEach(q => {
@@ -466,29 +498,38 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 });
             } else {
                 o.classList.add("hidden");
-                L.acts.forEach(act => {
-                    const btn = document.createElement("button");
-                    btn.className = "link action-link";
-                    btn.textContent = "> " + act.t;
-                    btn.onclick = (e) => {
-                        e.preventDefault();
-                        const orig = btn.textContent;
-                        btn.textContent = orig + " [sent]";
-                        btn.disabled = true;
-                        addLog(act.e);  // show the deed immediately (real-game feel)
-                        // Fire remember; restore button when the request acknowledges (fast now)
-                        fetch("/api/remember", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ player_id: player, npc_id: getNpc(key), event: act.e })
-                        }).finally(() => {
-                            btn.textContent = orig;
-                            btn.disabled = false;
-                        }).catch(() => {});
-                    };
-                    actEl.appendChild(btn);
-                });
             }
+
+            // Render location actions for EVERY location — the grove now has
+            // Elara's own actions alongside her seer panel.
+            L.acts.forEach(act => {
+                const btn = document.createElement("button");
+                btn.className = "link action-link";
+                btn.textContent = "> " + act.t;
+                btn.onclick = (e) => {
+                    e.preventDefault();
+                    const orig = btn.textContent;
+                    btn.textContent = orig + " [sent]";
+                    btn.disabled = true;
+                    addLog(act.e);  // show the deed immediately (real-game feel)
+                    // The deed changes what NPCs know — drop stale client-cached
+                    // answers for the acting NPC (and Elara, who hears public deeds).
+                    invalidateCached(getNpc(key));
+                    if (key === "forge" || key === "tavern") invalidateCached("elara");
+                    // Fire remember; restore button when the request acknowledges.
+                    // Forge/tavern deeds are PUBLIC — the server also whispers them
+                    // to Elara (town gossip). Her own grove deeds stay hers alone.
+                    fetch("/api/remember", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ player_id: player, npc_id: getNpc(key), event: act.e, gossip: (key === "forge" || key === "tavern") })
+                    }).finally(() => {
+                        btn.textContent = orig;
+                        btn.disabled = false;
+                    }).catch(() => {});
+                };
+                actEl.appendChild(btn);
+            });
 
             const t = document.getElementById("travel");
             t.innerHTML = "";
@@ -511,6 +552,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
         function getNpc(l) {
             if (l==="forge") return "gethin";
             if (l==="tavern") return "mara";
+            if (l==="grove") return "elara";
             return null;
         }
 
@@ -560,6 +602,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             // signal that this NPC should remember the conversation.
             const targets = getMentionedNpcs(msg);
             const dflt = targets.length >= 3 ? ["gethin"] : targets; // unaddressed "hey" -> just 1 NPC
+            dflt.forEach(npc => invalidateCached(npc)); // chat writes make cached answers stale too
             dflt.forEach(npc =>
                 fetch("/api/remember", {
                     method: "POST",
@@ -655,10 +698,10 @@ async def api_remember(request: Request):
     
     npcs = get_npcs(player_id)
     npc = npcs.get(npc_id)
-    
+
     if not npc or not event:
         return {"ok": False, "error": "invalid request"}
-    
+
     # Fire-and-forget the remember so the HTTP response returns immediately.
     # The actual work (cognify etc) happens on the shared background worker.
     async def _background_remember():
@@ -666,8 +709,30 @@ async def api_remember(request: Request):
             await npc.aremember(event)
         except Exception as e:
             print("remember background error:", e)
-    
-    asyncio.create_task(_background_remember())
+
+    _spawn(_background_remember())
+
+    # Town gossip: public deeds done to Gethin/Mara also reach Elara the seer —
+    # written as HER OWN engram (per-NPC isolation stays intact; gossip is an
+    # explicit second write, not a backdoor read). Only when the frontend flags
+    # a deed as public (location actions), never for chat spam — that keeps the
+    # write volume at deed-pace, per the 160s-bottleneck fix.
+    if data.get("gossip") and npc_id != "elara":
+        elara = npcs.get("elara")
+        if elara:
+            whisper = f"Village whispers reached Elara the seer: {event}"
+
+            async def _background_gossip():
+                try:
+                    await elara.aremember(whisper)
+                except Exception as e:
+                    print("gossip background error:", e)
+
+            _spawn(_background_gossip())
+            # Elara's cached answers are now stale too
+            to_delete = [k for k in _recall_cache if k[0] == player_id and k[1] == "elara"]
+            for k in to_delete:
+                _recall_cache.pop(k, None)
     
     # Optimistically invalidate short recall cache (the write is in flight)
     to_delete = [k for k in _recall_cache if k[0] == player_id and k[1] == npc_id]
