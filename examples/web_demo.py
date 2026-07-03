@@ -347,6 +347,15 @@ async def index():
             elara: "You are Elara, the village seer of Eldridge. You hear every whisper in town and speak in calm, knowing tones — if gossip about this player has reached you, hint that you know what they did elsewhere."
         };
 
+        // When an NPC has NO memories of this player, the SDK returns "" (it
+        // refuses to let the LLM invent a history). Strangers get treated like
+        // strangers — in character.
+        const STRANGER = {
+            gethin: "Hm. New face. Buy something or move along.",
+            mara: "Do I know you? ...Didn't think so.",
+            elara: "The mists show me nothing of you. Yet."
+        };
+
         async function triggerAutoReactions(message, targets, rememberSet = []) {
             const el = document.getElementById("chat-log");
             const thinking = document.createElement("div");
@@ -394,7 +403,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             results.forEach(({ npc, answer, duration, cached }) => {
                 const name = npc === "gethin" ? "Gethin" : npc === "mara" ? "Mara" : "Elara";
                 const tstr = duration > 10 ? ` (${formatTiming(duration, cached)})` : (cached ? ' (cached)' : '');
-                const finalAnswer = answer || "*thinks for a moment*";
+                const finalAnswer = answer || STRANGER[npc] || "*studies you silently*";
                 chatEntries.push(`${name}: ${finalAnswer}${tstr}`);
 
                 // Commit the EXCHANGE (player line + this NPC's reply) to memory for

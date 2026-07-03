@@ -49,6 +49,11 @@ _NO_MEMORY_HINTS = (
     "usernotfound",
     "empty knowledge graph",
     "empty graph",
+    # A recall for an NPC nobody has remember()ed to yet: its dataset doesn't
+    # exist, and Cognee raises DatasetNotFoundError ("No datasets found").
+    # Seen live via the web demo (untaught Elara) — expected, not an error.
+    "datasetnotfound",
+    "no datasets found",
 )
 
 
@@ -131,21 +136,31 @@ class LocalCogneeBackend(MemoryBackend):
                 "something, do not invent it. Stay in character and be concise."
             )
 
+        common = dict(
+            query_text=query,
+            datasets=[dataset],
+            node_name=list(node_set),
+            query_type=getattr(SearchType, self.settings.search_type),
+            top_k=self.settings.top_k,
+            # Match ALL tags (this NPC AND this player) — isolates memories
+            # across NPCs and across players.
+            node_name_filter_operator="AND",
+            # Honor the requested search type; else Cognee may reroute (COT).
+            auto_route=False,
+        )
         try:
             async with _serialize():
-                results = await cognee.recall(
-                    query_text=query,
-                    datasets=[dataset],
-                    node_name=list(node_set),
-                    query_type=getattr(SearchType, self.settings.search_type),
-                    top_k=self.settings.top_k,
-                    # Match ALL tags (this NPC AND this player) — isolates memories
-                    # across NPCs and across players.
-                    node_name_filter_operator="AND",
-                    # Honor the requested search type; else Cognee may reroute (COT).
-                    auto_route=False,
-                    **recall_kwargs,
-                )
+                # Guard: probe the retrieved CONTEXT first (no LLM, ~0.2s). If this
+                # NPC has no memories of this player (e.g. a brand-new player whose
+                # first write hasn't landed), the completion stage would otherwise
+                # improvise a confident, in-character backstory from thin air —
+                # verified live: a fresh player was "accused" of another player's
+                # archetypal deeds. No context -> no answer, full stop.
+                probe = await cognee.recall(only_context=True, **common)
+                if not _first_text(probe):
+                    _log.debug("recall: empty context for %s (no memories of this player)", dataset)
+                    return ""
+                results = await cognee.recall(**common, **recall_kwargs)
         except Exception as exc:
             name = type(exc).__name__
             msg = str(exc).lower()
