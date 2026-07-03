@@ -50,7 +50,7 @@ Real per-player, cross-"session" memory. No scripts. No flags. Pure Cognee graph
 
 ---
 
-## How it works (deep Cognee usage)
+## How it works
 
 ```python
 from sonder_engram import NPC, Settings
@@ -67,16 +67,16 @@ npc.sync()
 mood = npc.recall("How do you feel about this player?")
 ```
 
-**What makes this real Cognee usage** (judges: look here):
-- Permanent writes (`remember` without `session_id` → `add()` + `cognify()` builds the graph per event)
-- Strong per-player + per-NPC isolation using `node_set` + `AND` filter
-- **Cross-NPC "gossip"** — public deeds also reach Elara the seer as an explicit second engram written to *her* graph; isolation stays honest, and word still travels
-- **NPCs remember conversations** — chat exchanges (your line + their reply) are committed to the targeted NPC's graph
-- Single background worker + lock (Cognee's global embedded state is dangerous)
-- `recall` always goes through the hybrid graph + vector layer
-- Works across full process restarts when storage is persisted
+Under the hood:
+- Permanent writes — `remember` without `session_id` runs `add()` + `cognify()`, building real graph per event (no session-distillation tricks)
+- Per-player + per-NPC isolation via `node_set` tags matched with an `AND` filter; one player's actions never leak to another
+- No context, no answer — recall probes the retrieved context first and returns nothing rather than let the LLM invent a history for a player it has no memories of
+- Cross-NPC "gossip" — public deeds also reach Elara the seer as an explicit second engram written to *her* graph; isolation stays honest, and word still travels
+- NPCs remember conversations — chat exchanges (your line + their reply) are committed to the targeted NPC's graph
+- Single background worker + lock (Cognee's embedded state is global and concurrent writes corrupt it), with timeout cancellation and observable failures
+- Survives full process restarts when the data roots are persisted (see [`railway.toml`](railway.toml))
 
-Full recipe and verified API surface: [`docs/PINNED_API.md`](docs/PINNED_API.md) and [`docs/HANDOFF.md`](docs/HANDOFF.md).
+Everything above was verified from a clean slate — the findings, and the traps we hit on the way, are written up in [`docs/PINNED_API.md`](docs/PINNED_API.md) and [`docs/HANDOFF.md`](docs/HANDOFF.md).
 
 ## The demo world
 
@@ -100,18 +100,10 @@ Any OpenAI-compatible LLM works; embeddings run **locally** via fastembed (no ke
 
 DeepSeek and Gemini configs are documented in [`.env.example`](.env.example). Deploying? [`railway.toml`](railway.toml) documents the volume + `DATA_ROOT_DIRECTORY`/`SYSTEM_ROOT_DIRECTORY`/`CACHE_ROOT_DIRECTORY` env vars — Cognee's databases don't live in `~/.cognee`, and without these your memories die on redeploy.
 
-## Why this is a strong "Best Use of Open Source" entry
-
-- Deep, correct use of Cognee's memory primitives (permanent writes, `node_set` isolation, worker serialization) — verified from clean state and documented
-- **Live, clickable proof of persistence** with the [restart server] button — and a hosted demo judges can play in ten seconds
-- Cross-NPC memory (gossip) and conversation memory built on the same primitives
-- Zero OpenAI dependency (any compatible provider + local embeddings)
-- Solves a real, long-standing game design problem — and ships as a reusable SDK, not just an app
-
 ## License
 
 Apache-2.0. Built on [Cognee](https://github.com/topoteretes/cognee).
 
 ---
 
-**For the hackathon**: The most important thing in this repo is the web demo. Restart the server, do something memorable, come back with the same player. That's the thesis.
+Start with the web demo. Do something memorable, restart the server, come back. That's the whole idea.
