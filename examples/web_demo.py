@@ -71,7 +71,10 @@ def _spawn(coro) -> None:
 def get_npcs(player_id: str) -> Dict[str, NPC]:
     """Get or create the demo NPCs for a given player."""
     if player_id not in _player_npcs:
-        settings = Settings(ground_strict=True)  # lean a bit toward stored facts
+        # ground_strict: lean toward stored facts. top_k=12: chat-exchange engrams
+        # multiply fast and can crowd deed memories out of the candidate set at the
+        # default 8 — a few extra chunks keeps betrayals surfacing next to banter.
+        settings = Settings(ground_strict=True, top_k=12)
         _player_npcs[player_id] = {
             "gethin": NPC("gethin_the_blacksmith", player_id=player_id, settings=settings),
             "mara": NPC("mara_the_bandit", player_id=player_id, settings=settings),
@@ -140,7 +143,7 @@ async def index():
           <li>The Oracle lets you query what NPCs actually recall about you</li>
           <li>Post in the village group chat — every NPC remembers it. They react automatically with @mentions</li>
           <li>Word travels: deeds at the forge or tavern reach Elara the seer as gossip — visit the grove and she'll hint at what you did elsewhere</li>
-          <li>No login — a save code minted in your browser IS your identity, and the knowledge graph is your save file. Copy the code to continue the same life on another device</li>
+          <li>Your name is your save — return with the same name and the town still remembers you (it stays logged in on this browser too)</li>
           <li>Visible timing + caches show you the real cost and how games hide it</li>
         </ul>
 
@@ -160,9 +163,8 @@ async def index():
         <div class="flex justify-between text-sm mb-2 border-b border-[#4a3f2e] pb-1">
             <div><strong>SONDER</strong> <span class="text-xs">text rpg</span></div>
             <div>
-                Save: <span id="save-label" class="text-xs border-b border-[#4a3f2e] px-1" title="Your save code is your identity — the knowledge graph is your save file."></span>
-                <button onclick="copySaveCode()" class="text-xs">[copy code]</button>
-                <button onclick="loadSaveCode()" class="text-xs">[load code]</button>
+                Player:
+                <input id="pid-input" class="bg-transparent border-b border-[#4a3f2e] px-1 w-40" title="Your name is your save — return with the same name and the town remembers you." onchange="setPlayerId(this.value)">
                 <button onclick="newLife()" class="text-xs">[new life]</button>
                 <button onclick="restartServer()" class="text-xs">[restart server]</button>
             </div>
@@ -207,15 +209,12 @@ async def index():
     </div> <!-- /#game-ui -->
 
     <script>
-        // Save-code identity: an unguessable id minted once and kept in
-        // localStorage — your browser IS your save slot. No login, no typing;
-        // returning players are recognized automatically, and the code can be
-        // copied to continue the same life on another device.
+        // Username login, game-style: the name you type IS your save — return
+        // with the same name (any device) and the town remembers you. It's also
+        // persisted in this browser so refreshes and restarts keep you logged in.
         function mintPlayerId() {
-            const uuid = (window.crypto && crypto.randomUUID)
-                ? crypto.randomUUID()
-                : (Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
-            return "traveler_" + uuid;
+            // placeholder identity for fresh visitors until they claim a name
+            return "stranger_" + Math.random().toString(36).slice(2, 6);
         }
         function ensureIdentity() {
             let id = null;
@@ -298,7 +297,11 @@ async def index():
         }
 
         function initGameUI() {
-            renderSaveLabel();
+            const inp = document.getElementById("pid-input");
+            if (inp) {
+                inp.value = player;
+                inp.onchange = () => setPlayerId(inp.value);
+            }
             // The status was already called in onload; just set up the world
             logs = ["08:01 You arrive in Eldridge. No one knows you."];
             chatEntries = [];
@@ -419,9 +422,9 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 n: "The Forge",
                 d: "Heat and hammer strikes. Gethin works iron with intense focus.",
                 acts: [
-                    {t: "Praise his craft and buy a blade", e: "You praised Gethin's craftsmanship and bought a sword."},
+                    {t: "Praise his craft and buy a blade", e: "You praised Gethin's craftsmanship and bought a sword.", m: "The player praised Gethin's craftsmanship and bought a sword from him."},
                     {t: "Commission a custom hunting dagger", e: "The player commissioned a custom hunting dagger from Gethin and paid half up front."},
-                    {t: "Insult his work", e: "You mocked Gethin's craftsmanship and left empty-handed."}
+                    {t: "Insult his work", e: "You mocked Gethin's craftsmanship and left empty-handed.", m: "The player mocked Gethin's craftsmanship to his face and left without buying anything."}
                 ],
                 go: ["square", "tavern"]
             },
@@ -429,10 +432,10 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 n: "The Drunken Boar",
                 d: "Dim light, wary eyes. Mara sits in the corner, watching.",
                 acts: [
-                    {t: "Buy her a drink and talk", e: "You bought Mara a drink and heard her story."},
+                    {t: "Buy her a drink and talk", e: "You bought Mara a drink and heard her story.", m: "The player bought Mara a drink and listened to her story."},
                     {t: "Flirt with her over the rim of your cup", e: "The player flirted with Mara, complimenting her sharp eyes; she smirked despite herself and let them sit a little closer."},
                     {t: "Ask about the scar on her hand", e: "The player asked Mara about the scar on her hand; she shared a guarded story about the road that gave it to her."},
-                    {t: "Slip the guards her location", e: "You betrayed Mara's location to the town guard."}
+                    {t: "Slip the guards her location", e: "You betrayed Mara's location to the town guard.", m: "The player betrayed Mara by slipping her location to the town guard."}
                 ],
                 go: ["square", "forge"]
             },
@@ -557,7 +560,10 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                     fetch("/api/remember", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ player_id: player, npc_id: getNpc(key), event: act.e, gossip: (key === "forge" || key === "tavern") })
+                        // act.m = memory-clear phrasing ("The player ...") so extraction
+                        // links every deed to a stable player entity; act.e stays as the
+                        // friendly second-person deeds-log line.
+                        body: JSON.stringify({ player_id: player, npc_id: getNpc(key), event: act.m || act.e, gossip: (key === "forge" || key === "tavern") })
                     }).finally(() => {
                         btn.textContent = orig;
                         btn.disabled = false;
@@ -651,7 +657,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
         async function newLife() {
             player = mintPlayerId();
             try { localStorage.setItem("sonder_player_id", player); } catch (e) {}
-            renderSaveLabel();
+            renderPlayerInput();
             logs = [];
             chatEntries = [];
             // Clear client cache when starting over
@@ -662,28 +668,9 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             setLoc("square");
         }
 
-        function shortCode(id) {
-            return id.length > 18 ? id.slice(0, 13) + "…" + id.slice(-4) : id;
-        }
-
-        function renderSaveLabel() {
-            const el = document.getElementById("save-label");
-            if (el) el.textContent = "✦ " + shortCode(player);
-        }
-
-        async function copySaveCode() {
-            try {
-                await navigator.clipboard.writeText(player);
-                addLog("Save code copied. It IS your identity — keep it safe.");
-            } catch (e) {
-                prompt("Copy your save code:", player);
-            }
-        }
-
-        function loadSaveCode() {
-            const code = (prompt("Paste a save code to continue that life:") || "").trim();
-            if (!code) return;
-            setPlayerId(code);
+        function renderPlayerInput() {
+            const inp = document.getElementById("pid-input");
+            if (inp) inp.value = player;
         }
 
         function setPlayerId(val) {
@@ -692,8 +679,8 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             Object.keys(memoryCache).forEach(k => delete memoryCache[k]);
             player = val.trim();
             try { localStorage.setItem("sonder_player_id", player); } catch (e) {}
-            renderSaveLabel();
-            addLog("Save loaded. The town remembers this life.");
+            renderPlayerInput();
+            addLog("Identity set to " + player + ". The town will remember this name.");
             fetch("/api/status", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({player_id:player})});
         }
 
