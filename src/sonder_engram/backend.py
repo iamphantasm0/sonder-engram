@@ -49,6 +49,11 @@ _NO_MEMORY_HINTS = (
     "usernotfound",
     "empty knowledge graph",
     "empty graph",
+    # A recall for an NPC nobody has remember()ed to yet: its dataset doesn't
+    # exist, and Cognee raises DatasetNotFoundError ("No datasets found").
+    # Seen live via the web demo (untaught Elara) — expected, not an error.
+    "datasetnotfound",
+    "no datasets found",
 )
 
 
