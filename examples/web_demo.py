@@ -140,6 +140,7 @@ async def index():
           <li>The Oracle lets you query what NPCs actually recall about you</li>
           <li>Post in the village group chat — every NPC remembers it. They react automatically with @mentions</li>
           <li>Word travels: deeds at the forge or tavern reach Elara the seer as gossip — visit the grove and she'll hint at what you did elsewhere</li>
+          <li>No login — a save code minted in your browser IS your identity, and the knowledge graph is your save file. Copy the code to continue the same life on another device</li>
           <li>Visible timing + caches show you the real cost and how games hide it</li>
         </ul>
 
@@ -159,8 +160,9 @@ async def index():
         <div class="flex justify-between text-sm mb-2 border-b border-[#4a3f2e] pb-1">
             <div><strong>SONDER</strong> <span class="text-xs">text rpg</span></div>
             <div>
-                Player: 
-                <input id="pid-input" class="bg-transparent border-b border-[#4a3f2e] px-1 w-40" value="curious_traveler" onchange="setPlayerId(this.value)">
+                Save: <span id="save-label" class="text-xs border-b border-[#4a3f2e] px-1" title="Your save code is your identity — the knowledge graph is your save file."></span>
+                <button onclick="copySaveCode()" class="text-xs">[copy code]</button>
+                <button onclick="loadSaveCode()" class="text-xs">[load code]</button>
                 <button onclick="newLife()" class="text-xs">[new life]</button>
                 <button onclick="restartServer()" class="text-xs">[restart server]</button>
             </div>
@@ -205,7 +207,26 @@ async def index():
     </div> <!-- /#game-ui -->
 
     <script>
-        let player = "curious_traveler";
+        // Save-code identity: an unguessable id minted once and kept in
+        // localStorage — your browser IS your save slot. No login, no typing;
+        // returning players are recognized automatically, and the code can be
+        // copied to continue the same life on another device.
+        function mintPlayerId() {
+            const uuid = (window.crypto && crypto.randomUUID)
+                ? crypto.randomUUID()
+                : (Date.now().toString(36) + Math.random().toString(36).slice(2, 10));
+            return "traveler_" + uuid;
+        }
+        function ensureIdentity() {
+            let id = null;
+            try { id = localStorage.getItem("sonder_player_id"); } catch (e) {}
+            if (!id) {
+                id = mintPlayerId();
+                try { localStorage.setItem("sonder_player_id", id); } catch (e) {}
+            }
+            return id;
+        }
+        let player = ensureIdentity();
         let loc = "square";
         let logs = [];
         let chatEntries = [];
@@ -277,11 +298,7 @@ async def index():
         }
 
         function initGameUI() {
-            const inp = document.getElementById("pid-input");
-            if (inp) {
-                inp.value = player;
-                inp.onchange = () => setPlayerId(inp.value);
-            }
+            renderSaveLabel();
             // The status was already called in onload; just set up the world
             logs = ["08:01 You arrive in Eldridge. No one knows you."];
             chatEntries = [];
@@ -632,10 +649,9 @@ As yourself, reply naturally in character. Use any memories you have of this pla
         // npcsReactToChat removed — reactions now happen automatically after every chat post (with @ support)
 
         async function newLife() {
-            const newId = "stranger_" + Math.floor(Math.random()*9999);
-            player = newId;
-            const inp = document.getElementById("pid-input");
-            if (inp) inp.value = player;
+            player = mintPlayerId();
+            try { localStorage.setItem("sonder_player_id", player); } catch (e) {}
+            renderSaveLabel();
             logs = [];
             chatEntries = [];
             // Clear client cache when starting over
@@ -646,12 +662,38 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             setLoc("square");
         }
 
+        function shortCode(id) {
+            return id.length > 18 ? id.slice(0, 13) + "…" + id.slice(-4) : id;
+        }
+
+        function renderSaveLabel() {
+            const el = document.getElementById("save-label");
+            if (el) el.textContent = "✦ " + shortCode(player);
+        }
+
+        async function copySaveCode() {
+            try {
+                await navigator.clipboard.writeText(player);
+                addLog("Save code copied. It IS your identity — keep it safe.");
+            } catch (e) {
+                prompt("Copy your save code:", player);
+            }
+        }
+
+        function loadSaveCode() {
+            const code = (prompt("Paste a save code to continue that life:") || "").trim();
+            if (!code) return;
+            setPlayerId(code);
+        }
+
         function setPlayerId(val) {
             if (!val) return;
             // Clear previous player's cached memories
             Object.keys(memoryCache).forEach(k => delete memoryCache[k]);
             player = val.trim();
-            addLog("Identity set to " + player + ". Future deeds will be under this name.");
+            try { localStorage.setItem("sonder_player_id", player); } catch (e) {}
+            renderSaveLabel();
+            addLog("Save loaded. The town remembers this life.");
             fetch("/api/status", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({player_id:player})});
         }
 
