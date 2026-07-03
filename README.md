@@ -11,6 +11,12 @@
 
 🎮 **Live demo:** [sonder-engram.up.railway.app](https://sonder-engram.up.railway.app) — no setup, click and play. · 📦 **PyPI:** [sonder-engram](https://pypi.org/project/sonder-engram/)
 
+<!-- DEMO GIF — drop your ~20s clip at docs/media/demo.gif (see PR notes for the
+     ffmpeg recipe), commit it to this branch, and this renders inline. -->
+![Sonder demo — Mara remembers the betrayal across a full server restart](docs/media/demo.gif)
+
+<sub>▲ real Cognee recalls, live — insult her, restart the server, she still remembers.</sub>
+
 Built for the [WeMakeDevs × Cognee hackathon](https://www.wemakedevs.org/hackathons/cognee) ("Best Use of Open Source" track).
 
 ---
