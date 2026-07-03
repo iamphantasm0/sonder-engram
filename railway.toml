@@ -8,14 +8,44 @@ sleepApplication = false
 
 # The script auto-detects $PORT (injected by Railway) and binds to 0.0.0.0 when present.
 # Optional: set SONDER_WEB_HOST=0.0.0.0 explicitly if needed.
-# Alternative (no startup banner):
-# startCommand = "uvicorn examples.web_demo:app --host 0.0.0.0 --port $PORT --no-access-log"
 
-# Persistent storage for Cognee (knowledge graphs, vectors, etc.)
-# After deploying, in Railway dashboard for this service:
-# 1. Volumes -> Create Volume named "cognee-data"
-# 2. Mount path: /root/.cognee
-# This makes NPC memories survive deploys/restarts.
+# =============================================================================
+# PERSISTENCE — REQUIRED for memories to survive deploys/restarts
+# =============================================================================
+# Cognee does NOT keep data in ~/.cognee (that's only logs). By default it writes
+# its databases INSIDE site-packages (wiped on every deploy):
+#   .data_storage/    raw ingested data
+#   .cognee_system/   the actual graph/vector/relational databases
+#   .cognee_cache/    cache
+# So mount a volume at /data and relocate all three roots onto it:
+#
+# 1. Railway dashboard -> service -> Volumes -> Create Volume
+#      Mount path: /data          (NOT /root/.cognee — that only captures logs)
+# 2. Railway Variables (verified env overrides, cognee 1.2.2 BaseConfig):
+#      DATA_ROOT_DIRECTORY=/data/cognee/data
+#      SYSTEM_ROOT_DIRECTORY=/data/cognee/system
+#      CACHE_ROOT_DIRECTORY=/data/cognee/cache
+#      HF_HOME=/data/hf           (caches the fastembed model; avoids ~90MB re-download per deploy)
+
+# =============================================================================
+# PERFORMANCE — the LLM call is the bottleneck, not Cognee
+# =============================================================================
+# Measured (clean graph): retrieval+graph traversal ~0.2s; full recall ~3.5s;
+# remember (add+cognify) ~9s locally / ~30s on Railway CPU. Nearly all of it is
+# DeepSeek completion latency, and remembers block recalls on the single worker.
+# Candidate tuning (top_k / wide_search_top_k) moves ~0.3s — not worth it.
+#
+# For a snappy demo, use a faster free provider (env-only swap):
+#   Groq (fastest):
+#     LLM_PROVIDER=custom
+#     LLM_ENDPOINT=https://api.groq.com/openai/v1
+#     LLM_MODEL=openai/llama-3.3-70b-versatile
+#     LLM_API_KEY=<free key from console.groq.com>
+#   Gemini Flash (native adapter):
+#     LLM_PROVIDER=gemini
+#     LLM_MODEL=gemini/gemini-2.0-flash
+#     LLM_API_KEY=<free key from aistudio.google.com>
+# Test one remember after swapping (structured extraction needs JSON mode to behave).
 
 # Required env vars (set in Railway Variables, not committed):
 # LLM_API_KEY=...
