@@ -214,7 +214,15 @@ async def index():
         // persisted in this browser so refreshes and restarts keep you logged in.
         function mintPlayerId() {
             // placeholder identity for fresh visitors until they claim a name
-            return "stranger_" + Math.random().toString(36).slice(2, 6);
+            // (8 base36 chars — enough entropy that two strangers won't collide
+            // on the same id and see each other's NPC memories)
+            return "stranger_" + Math.random().toString(36).slice(2, 10);
+        }
+
+        // Escape ANY dynamic text (typed names, chat, LLM answers) before it
+        // reaches innerHTML — free-text usernames made XSS reachable here.
+        function esc(s) {
+            return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
         }
         function ensureIdentity() {
             let id = null;
@@ -423,7 +431,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 d: "Heat and hammer strikes. Gethin works iron with intense focus.",
                 acts: [
                     {t: "Praise his craft and buy a blade", e: "You praised Gethin's craftsmanship and bought a sword.", m: "The player praised Gethin's craftsmanship and bought a sword from him."},
-                    {t: "Commission a custom hunting dagger", e: "The player commissioned a custom hunting dagger from Gethin and paid half up front."},
+                    {t: "Commission a custom hunting dagger", e: "You commissioned a custom hunting dagger from Gethin and paid half up front.", m: "The player commissioned a custom hunting dagger from Gethin and paid half up front."},
                     {t: "Insult his work", e: "You mocked Gethin's craftsmanship and left empty-handed.", m: "The player mocked Gethin's craftsmanship to his face and left without buying anything."}
                 ],
                 go: ["square", "tavern"]
@@ -433,8 +441,8 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 d: "Dim light, wary eyes. Mara sits in the corner, watching.",
                 acts: [
                     {t: "Buy her a drink and talk", e: "You bought Mara a drink and heard her story.", m: "The player bought Mara a drink and listened to her story."},
-                    {t: "Flirt with her over the rim of your cup", e: "The player flirted with Mara, complimenting her sharp eyes; she smirked despite herself and let them sit a little closer."},
-                    {t: "Ask about the scar on her hand", e: "The player asked Mara about the scar on her hand; she shared a guarded story about the road that gave it to her."},
+                    {t: "Flirt with her over the rim of your cup", e: "You flirted with Mara, complimenting her sharp eyes; she smirked and let you sit a little closer.", m: "The player flirted with Mara, complimenting her sharp eyes; she smirked despite herself and let them sit a little closer."},
+                    {t: "Ask about the scar on her hand", e: "You asked Mara about the scar on her hand; she shared a guarded story.", m: "The player asked Mara about the scar on her hand; she shared a guarded story about the road that gave it to her."},
                     {t: "Slip the guards her location", e: "You betrayed Mara's location to the town guard.", m: "The player betrayed Mara by slipping her location to the town guard."}
                 ],
                 go: ["square", "forge"]
@@ -443,8 +451,8 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 n: "The Oracle's Grove",
                 d: "Ancient stones in the mist. Elara the seer waits, eyes clouded with visions. They say she hears every whisper in Eldridge.",
                 acts: [
-                    {t: "Cross her palm with silver for a reading", e: "The player paid Elara for a reading and listened to her visions with respect."},
-                    {t: "Scoff and call her visions a fraud", e: "The player mocked Elara's visions and called her a fraud to her face."}
+                    {t: "Cross her palm with silver for a reading", e: "You paid Elara for a reading and listened to her visions.", m: "The player paid Elara for a reading and listened to her visions with respect."},
+                    {t: "Scoff and call her visions a fraud", e: "You scoffed and called Elara's visions a fraud to her face.", m: "The player mocked Elara's visions and called her a fraud to her face."}
                 ],
                 go: ["square"]
             }
@@ -505,13 +513,13 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                                 const totalDt = performance.now() - t0;
                                 r.innerHTML = recalls.map(({nn, answer, dt, cached}) => {
                                     const timeStr = dt !== null ? formatTiming(dt, cached) : formatTiming(totalDt / 3, cached);
-                                    return `<div><strong>${nn}:</strong> ${answer} <span class="text-[10px] opacity-60">(${timeStr})</span></div>`;
+                                    return `<div><strong>${esc(nn)}:</strong> ${esc(answer)} <span class="text-[10px] opacity-60">(${timeStr})</span></div>`;
                                 }).join("");
                             } else {
                                 // Single NPC query – check cache first (prefetched on travel!)
                                 const cached = getCached(q.n, q.q);
                                 if (cached !== undefined) {
-                                    r.innerHTML = `${cached || "The mists stay silent."} <span class="text-[10px] opacity-60">(cached)</span>`;
+                                    r.innerHTML = `${esc(cached || "The mists stay silent.")} <span class="text-[10px] opacity-60">(cached)</span>`;
                                     btn.textContent = orig;
                                     btn.disabled = false;
                                     return;
@@ -525,7 +533,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                                 const answer = d.answer || "The mists stay silent.";
                                 setCached(q.n, q.q, answer);
                                 const isServerCached = d.cached === true;
-                                r.innerHTML = `${answer} <span class="text-[10px] opacity-60">(${formatTiming(dt, isServerCached)})</span>`;
+                                r.innerHTML = `${esc(answer)} <span class="text-[10px] opacity-60">(${formatTiming(dt, isServerCached)})</span>`;
                             }
                         } finally {
                             btn.textContent = orig;
@@ -613,7 +621,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 el.innerHTML = `<div class="text-[#6b5f4f]">No deeds yet.</div>`;
                 return;
             }
-            el.innerHTML = logs.map(l => `<div class="log-entry">${l}</div>`).join("");
+            el.innerHTML = logs.map(l => `<div class="log-entry">${esc(l)}</div>`).join("");
         }
 
         function clearLog() { logs = []; renderLog(); }
@@ -624,7 +632,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 el.innerHTML = `<div class="text-[#6b5f4f]">The village is quiet...</div>`;
                 return;
             }
-            el.innerHTML = chatEntries.map(c => `<div>${c}</div>`).join("");
+            el.innerHTML = chatEntries.map(c => `<div>${esc(c)}</div>`).join("");
         }
 
         async function postToChat() {
@@ -674,10 +682,11 @@ As yourself, reply naturally in character. Use any memories you have of this pla
         }
 
         function setPlayerId(val) {
-            if (!val) return;
+            const trimmed = (val || "").trim();
+            if (!trimmed) { renderPlayerInput(); return; }  // reject blank/whitespace names
             // Clear previous player's cached memories
             Object.keys(memoryCache).forEach(k => delete memoryCache[k]);
-            player = val.trim();
+            player = trimmed;
             try { localStorage.setItem("sonder_player_id", player); } catch (e) {}
             renderPlayerInput();
             addLog("Identity set to " + player + ". The town will remember this name.");
