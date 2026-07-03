@@ -315,11 +315,11 @@ async def index():
         // mechanic: what she "sees" is the village whispers written to her graph.
         const PERSONA = {
             gethin: "You are Gethin, the gruff blacksmith of Eldridge. Plain words, short sentences, no patience for flattery.",
-            mara: "You are Mara, a wary bandit who trusts almost no one. Guarded, dry, streetwise.",
+            mara: "You are Mara, a wary bandit who trusts almost no one. Guarded, dry, streetwise — but genuine charm gets under her skin: if this player has been kind to you or flirted with you, let a reluctant warmth and playful teasing show through (never gush; she'd deny it if asked).",
             elara: "You are Elara, the village seer of Eldridge. You hear every whisper in town and speak in calm, knowing tones — if gossip about this player has reached you, hint that you know what they did elsewhere."
         };
 
-        async function triggerAutoReactions(message, targets) {
+        async function triggerAutoReactions(message, targets, rememberSet = []) {
             const el = document.getElementById("chat-log");
             const thinking = document.createElement("div");
             const typingText = targets.length === 1 
@@ -368,6 +368,21 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 const tstr = duration > 10 ? ` (${formatTiming(duration, cached)})` : (cached ? ' (cached)' : '');
                 const finalAnswer = answer || "*thinks for a moment*";
                 chatEntries.push(`${name}: ${finalAnswer}${tstr}`);
+
+                // Commit the EXCHANGE (player line + this NPC's reply) to memory for
+                // the targeted NPCs — after the reply, so recalls never queue behind
+                // the write, and the NPC remembers both sides of the conversation.
+                if (rememberSet.includes(npc)) {
+                    const exchange = answer
+                        ? `In the village group chat, the player said: "${message}" and ${name} replied: "${answer}"`
+                        : `In the village group chat, the player said: "${message}"`;
+                    invalidateCached(npc);
+                    fetch("/api/remember", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ player_id: player, npc_id: npc, event: exchange })
+                    }).catch(() => {});
+                }
             });
 
             renderChat();
@@ -388,6 +403,7 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 d: "Heat and hammer strikes. Gethin works iron with intense focus.",
                 acts: [
                     {t: "Praise his craft and buy a blade", e: "You praised Gethin's craftsmanship and bought a sword."},
+                    {t: "Commission a custom hunting dagger", e: "The player commissioned a custom hunting dagger from Gethin and paid half up front."},
                     {t: "Insult his work", e: "You mocked Gethin's craftsmanship and left empty-handed."}
                 ],
                 go: ["square", "tavern"]
@@ -397,6 +413,8 @@ As yourself, reply naturally in character. Use any memories you have of this pla
                 d: "Dim light, wary eyes. Mara sits in the corner, watching.",
                 acts: [
                     {t: "Buy her a drink and talk", e: "You bought Mara a drink and heard her story."},
+                    {t: "Flirt with her over the rim of your cup", e: "The player flirted with Mara, complimenting her sharp eyes; she smirked despite herself and let them sit a little closer."},
+                    {t: "Ask about the scar on her hand", e: "The player asked Mara about the scar on her hand; she shared a guarded story about the road that gave it to her."},
                     {t: "Slip the guards her location", e: "You betrayed Mara's location to the town guard."}
                 ],
                 go: ["square", "forge"]
@@ -594,27 +612,21 @@ As yourself, reply naturally in character. Use any memories you have of this pla
             chatEntries.push(entry);
             renderChat();
             inp.value = "";
-            const rememberText = `In the village group chat, the player said: "${msg}"`;
 
-            // Only write chat memory for @mentioned NPCs (or just gethin by default).
-            // Writing to all 3 NPCs queues 3×30s cognee pipelines on the single worker,
-            // starving the recalls the user actually wants to see. A @mention is the
-            // signal that this NPC should remember the conversation.
+            // Only @mentioned NPCs commit chat to memory (unaddressed "hey" -> just
+            // Gethin) — writing to all 3 queues 3 cognee pipelines on the single
+            // worker and starves recalls (the 160s-bottleneck fix).
             const targets = getMentionedNpcs(msg);
-            const dflt = targets.length >= 3 ? ["gethin"] : targets; // unaddressed "hey" -> just 1 NPC
-            dflt.forEach(npc => invalidateCached(npc)); // chat writes make cached answers stale too
-            dflt.forEach(npc =>
-                fetch("/api/remember", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ player_id: player, npc_id: npc, event: rememberText })
-                }).catch(() => {})
-            );
+            const rememberSet = targets.length >= 3 ? ["gethin"] : targets;
 
             addLog("Posted to village chat: " + msg);
 
-            // Immediately trigger visible reactions (they will show "X is typing..." then the replies)
-            triggerAutoReactions(msg, targets);
+            // Reactions FIRST: the reply prompt already contains the message, so
+            // recalls don't need the write to land. (Writing first made every reply
+            // queue behind its own cognify on the serialized worker — the 39s
+            // first-reply lag.) The full exchange (message + reply) is written to
+            // memory inside triggerAutoReactions once each reply arrives.
+            triggerAutoReactions(msg, targets, rememberSet);
         }
 
         // npcsReactToChat removed — reactions now happen automatically after every chat post (with @ support)
